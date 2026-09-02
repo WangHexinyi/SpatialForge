@@ -14,8 +14,8 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from spatialforge.schema import load_samples
 
 MODEL_DIR = Path("models/Qwen2.5-VL-3B-Instruct")
-TEST = Path("data/processed/vsr_test.jsonl")
-OUT = Path("outputs/vsr_results.jsonl")
+TEST = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/processed/vsr_test.jsonl")
+OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("outputs/vsr_results.jsonl")
 
 
 def parse_yesno(text: str):
@@ -67,7 +67,8 @@ def main() -> None:
                 stats[d][1] += 1
                 stats[d][0] += correct
             fout.write(json.dumps({"id": s.id, "gt": s.gt, "pred": pred,
-                                   "dims": s.dims, "relation": s.meta["relation"]},
+                                   "dims": s.dims,
+                                   "relation": s.meta.get("relation", "")},
                                   ensure_ascii=False) + "\n")
 
     print(f"missing={n_missing} unparsed={n_unparsed}")
