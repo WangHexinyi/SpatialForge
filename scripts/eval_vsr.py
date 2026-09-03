@@ -1,10 +1,15 @@
-"""G1 评测：Qwen2.5-VL-3B 全量跑 VSR test，输出总分与分维度准确率。"""
+r"""通用 VLM 空间评测（旗标参数化版）。
+
+用法：
+    python scripts/eval_vsr.py --test <jsonl> --out <jsonl> [--adapter <dir>] [--model <dir>]
+"""
+import argparse
 import json
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 使包导入成立
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from qwen_vl_utils import process_vision_info
@@ -12,10 +17,6 @@ from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 from spatialforge.schema import load_samples
-
-MODEL_DIR = Path("models/Qwen2.5-VL-3B-Instruct")
-TEST = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/processed/vsr_test.jsonl")
-OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("outputs/vsr_results.jsonl")
 
 
 def parse_yesno(text: str):
@@ -32,21 +33,29 @@ def parse_yesno(text: str):
     return None
 
 
-def main() -> None:
-    samples = load_samples(TEST)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--test", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--adapter", default="")
+    ap.add_argument("--model", default="models/Qwen2.5-VL-3B-Instruct")
+    args = ap.parse_args()
+
+    samples = load_samples(Path(args.test))
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        MODEL_DIR, dtype=torch.bfloat16, device_map="auto")
-    if len(sys.argv) > 3:
+        args.model, dtype=torch.bfloat16, device_map="auto")
+    if args.adapter:
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, sys.argv[3])
-        print("[info] adapter loaded:", sys.argv[3])
-    processor = AutoProcessor.from_pretrained(MODEL_DIR)
+        model = PeftModel.from_pretrained(model, args.adapter)
+        print("[info] adapter loaded:", args.adapter)
+    processor = AutoProcessor.from_pretrained(args.model)
 
     stats = defaultdict(lambda: [0, 0])
     n_missing = n_unparsed = 0
-    OUT.parent.mkdir(parents=True, exist_ok=True)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(OUT, "w", encoding="utf-8") as fout:
+    with open(out, "w", encoding="utf-8") as fout:
         for s in tqdm(samples):
             img = Path(s.images[0])
             if not img.exists():
