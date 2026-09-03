@@ -39,11 +39,14 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--adapter", default="")
     ap.add_argument("--model", default="models/Qwen2.5-VL-3B-Instruct")
+    ap.add_argument("--dtype", default="bfloat16")
     args = ap.parse_args()
 
     samples = load_samples(Path(args.test))
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.model, dtype=torch.bfloat16, device_map="auto")
+        args.model,
+        dtype=torch.float16 if args.dtype == "float16" else torch.bfloat16,
+        device_map="auto")
     if args.adapter:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.adapter)
