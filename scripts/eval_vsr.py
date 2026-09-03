@@ -36,6 +36,10 @@ def main() -> None:
     samples = load_samples(TEST)
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         MODEL_DIR, dtype=torch.bfloat16, device_map="auto")
+    if len(sys.argv) > 3:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, sys.argv[3])
+        print("[info] adapter loaded:", sys.argv[3])
     processor = AutoProcessor.from_pretrained(MODEL_DIR)
 
     stats = defaultdict(lambda: [0, 0])
