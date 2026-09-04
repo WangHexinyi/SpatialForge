@@ -15,18 +15,15 @@ class V1FrontBackCompatibilityTests(unittest.TestCase):
             look_at=(0.0, 0.0, 4.0),
         )
 
-        files = sorted(Path("outputs/synth").glob("scene_*.json"))
-        self.assertGreater(
-            len(files),
-            0,
-            "reference synthetic corpus is missing",
-        )
+        fixture_path = Path("tests/fixtures/v1_front_back_reference.json")
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        scenes = fixture["scenes"]
+        self.assertEqual(len(scenes), 100)
 
         checked_pairs = 0
 
-        for path in files:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            objects = data["objects"]
+        for scene in scenes:
+            objects = scene["objects"]
 
             for a, b in combinations(objects, 2):
                 ay = a["location"][1]
@@ -46,7 +43,7 @@ class V1FrontBackCompatibilityTests(unittest.TestCase):
                     v1_a_front,
                     v2_a_front,
                     msg=(
-                        f"front/back mismatch in {path.name}: "
+                        f"front/back mismatch in {scene['scene_id']}: "
                         f"{a['name']} {a['location']} vs "
                         f"{b['name']} {b['location']}"
                     ),

@@ -1,0 +1,54 @@
+{
+  "seed": 0,
+  "camera": [
+    0,
+    -6,
+    3
+  ],
+  "objects": [
+    {
+      "name": "obj0",
+      "shape": "sphere",
+      "color": "red",
+      "location": [
+        -1.027789074237476,
+        0.7289772014701512,
+        0.4
+      ],
+      "size": 0.8
+    },
+    {
+      "name": "obj1",
+      "shape": "sphere",
+      "color": "yellow",
+      "location": [
+        1.3327324431809586,
+        0.8929638482814064,
+        0.4
+      ],
+      "size": 0.8
+    },
+    {
+      "name": "obj2",
+      "shape": "cylinder",
+      "color": "blue",
+      "location": [
+        -0.3583089802724844,
+        -0.5959435574023324,
+        0.4
+      ],
+      "size": 0.8
+    },
+    {
+      "name": "obj3",
+      "shape": "sphere",
+      "color": "purple",
+      "location": [
+        0.7198728924833395,
+        -1.3025846182615721,
+        0.5
+      ],
+      "size": 1.0
+    }
+  ]
+}

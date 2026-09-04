@@ -4,9 +4,10 @@ Usage (from repo root):
     blender -b -P scripts/render_multiview.py
 
 Environment variables:
-    SYNTH_SEED   random seed (default: 0)
-    SYNTH_IDX    scene index like 003 (default: 000)
-    SCENE_JSON   path to a v1 scene JSON (overrides SYNTH_SEED/SYNTH_IDX)
+    SCENE_JSON   explicit scene JSON path
+    SYNTH_IDX    legacy generated scene index like 003 (optional)
+
+With neither variable set, the tracked examples/scenes/scene_000.json is used.
 
 This script may import bpy. It is NOT part of the CPU-side environment core.
 
@@ -136,12 +137,13 @@ def _configure_render():
 def main():
     # Determine scene source
     scene_json_env = os.environ.get("SCENE_JSON")
+    scene_idx_env = os.environ.get("SYNTH_IDX")
     if scene_json_env:
         scene_path = Path(scene_json_env)
+    elif scene_idx_env is not None:
+        scene_path = Path(_REPO_ROOT) / "outputs" / "synth" / f"scene_{scene_idx_env}.json"
     else:
-        seed = int(os.environ.get("SYNTH_SEED", "0"))
-        idx = os.environ.get("SYNTH_IDX", "000")
-        scene_path = Path(_REPO_ROOT) / "outputs" / "synth" / f"scene_{idx}.json"
+        scene_path = Path(_REPO_ROOT) / "examples" / "scenes" / "scene_000.json"
 
     if not scene_path.exists():
         print(f"[error] scene file not found: {scene_path}", file=sys.stderr)
