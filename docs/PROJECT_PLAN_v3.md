@@ -16,8 +16,8 @@
 ```text
 Project: SpatialForge
 Stage: v2.0 multi-view / spatial experience foundation
-Current development branch: feat/g2.0-b.1-camera-sampling
-Latest implementation commit: 6d08fcf
+Current development branch: feat/g2.0-c-spatial-truth
+Latest implementation commit: 19e3526
 
 Completed:
 - v1 diagnostic + LoRA baseline: CLOSED
@@ -27,6 +27,8 @@ Completed:
   commit: 8ced8de
 - G2.0-B.1 Camera Sampling System: PASS
   commit: 6d08fcf
+- G2.0-C View-Conditioned Spatial Truth Engine: PASS
+  commit: 19e3526
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -42,12 +44,21 @@ Verified after G2.0-B.1:
 - seeded jitter + continuous uniform-sphere sampling added
 - G2.0-B.1 itself does not require Blender
 
+Verified after G2.0-C:
+- total CPU unittest suite: 98 tests passed
+- 62 pre-existing tests preserved
+- 36 new G2.0-C tests
+- no existing source files modified
+- new files:
+  - spatialforge/environment/relation.py
+  - tests/test_spatial_truth_engine.py
+- G2.0-C itself does not require Blender
+
 NEXT:
-- G2.0-C View-Conditioned Spatial Truth Engine
-- then G2.0-D Multi-view QA Curriculum
+- G2.0-D Multi-view QA Curriculum
 ```
 
-新 AI **不要重做** G2.0-A / G2.0-B，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
+新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
 
 ---
 
@@ -663,6 +674,81 @@ G2.0-B.1 的定位：
 
 ---
 
+## 8.4 G2.0-C — View-Conditioned Spatial Truth Engine ✅
+
+Commit：
+
+```text
+19e3526 feat(g2.0-c): add view-conditioned spatial truth engine
+```
+
+新增：
+
+```text
+spatialforge/environment/
+└── relation.py
+
+tests/
+└── test_spatial_truth_engine.py
+```
+
+形成：
+
+```text
+SceneState + CameraPose
+        ↓
+compute_spatial_truth()
+        ↓
+SpatialTruthRecord
+    ├── per-object camera-relative truth
+    └── per-pair camera-relative relations
+```
+
+输入 `SceneState + CameraPose`，输出确定性 camera-relative spatial truth。
+定位：
+
+> Camera-relative 3D geometry truth layer。NOT image-projection / occlusion /
+> visibility / QA layer。全部基于 `SceneObject.location` 中心语义，不推断 extent。
+
+已实现语义：
+
+- camera-frame left / right / aligned
+- camera-frame above / below / aligned
+- signed-depth front / behind / same_depth
+- Euclidean camera-distance nearer / farther / equidistant
+- metric object-to-object distance 作为 world-invariant truth 保留，不随 CameraPose 改变
+- `SceneState.objects` tuple 顺序索引是权威 object identity，不假设 name 唯一，支持重复 name
+- behind-camera 对象保留并标记 `in_front_of_camera`
+- 确定性 pair ordering（index combinations）
+- 确定性 JSON 兼容 `SpatialTruthRecord` 序列化（`to_dict()`）
+- finite 且 >= 0 的 eps 校验（拒绝负值 / nan / inf）
+- 无 image-plane projection、occlusion、bbox、visibility、QA 逻辑进入本 gate
+
+Counterfactual 验证覆盖：
+
+- opposite-view relation flips
+- 纯相机旋转：camera-relative truth 改变，而 metric distance 不变
+- camera relocation 可使 near/far flip
+- canonical 6/14/26 views
+- jittered cameras
+- continuous sampled cameras
+- behind-camera cases
+- epsilon-band behavior
+- duplicate-name identity
+- deterministic serialization
+
+验收：
+
+```text
+98 CPU unittest tests passed
+62 pre-existing tests preserved
+36 new G2.0-C tests
+no existing source files modified
+Blender 不参与本 gate 的 CPU 测试
+```
+
+---
+
 # 9. v2.0 后续路线图
 
 ## G2.0-B.1 — Camera Sampling System ✅ DONE
@@ -693,7 +779,9 @@ G2.0-B.1 的定位：
 
 ---
 
-## G2.0-C — View-Conditioned Spatial Truth Engine
+## G2.0-C — View-Conditioned Spatial Truth Engine ✅ DONE
+
+> 已完成并通过门控，见 §8.4。以下保留为历史计划记录。
 
 这是 v2.0 最关键的“空间真值”层。
 
@@ -1510,33 +1598,31 @@ spatialforge explorer run
 
 # 27. 近期路线（执行顺序）
 
-## NEXT 1 — G2.0-C View-Conditioned Spatial Truth Engine
+> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C 均已通过门控（G2.0-C 见 §8.4）。以下是当前执行顺序。
 
-> G2.0-B.1 Camera Sampling System 已完成（§8.3）。现在进入 G2.0-C。
+## NEXT 1 — G2.0-D QA Curriculum
 
-目标：让任意 CameraPose 都能得到正确 relation labels。
-
-## NEXT 2 — G2.0-D QA Curriculum
+> G2.0-C View-Conditioned Spatial Truth Engine 已完成（§8.4）。现在进入 G2.0-D。
 
 把 relation truth 转成视角条件训练数据。
 
-## NEXT 3 — G2.0-E First Multi-view Training Experiment
+## NEXT 2 — G2.0-E First Multi-view Training Experiment
 
 回答：orientation 能不能移动？
 
-## NEXT 4 — v2.1 Embodied Explorer
+## NEXT 3 — v2.1 Embodied Explorer
 
 把 CameraPose 从系统指定转为 Agent action transition。
 
-## NEXT 5 — World Model Objective
+## NEXT 4 — World Model Objective
 
 动作条件 latent prediction。
 
-## NEXT 6 — v2.2 Active Observation
+## NEXT 5 — v2.2 Active Observation
 
 信息增益驱动的下一步观察。
 
-## NEXT 7 — v2.3 Interactive Object Search
+## NEXT 6 — v2.3 Interactive Object Search
 
 真正实现“找东西 + 遮挡 + 容器交互”。
 
@@ -1544,20 +1630,21 @@ spatialforge explorer run
 
 # 28. 当前暂停点（2026-09-06）
 
-今天工作在 **G2.0-B.1 门控完成** 处暂停。
+今天工作在 **G2.0-C 门控完成** 处暂停。
 
 正式状态：
 
 ```text
 Branch:
-feat/g2.0-b.1-camera-sampling
+feat/g2.0-c-spatial-truth
 
 Latest implementation commit:
-6d08fcf feat(g2.0-b.1): add camera sampling system
+19e3526 feat(g2.0-c): add view-conditioned spatial truth engine
 
 G2.0-A: PASS
 G2.0-B: PASS
 G2.0-B.1: PASS
+G2.0-C: PASS
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -1581,8 +1668,29 @@ Verified after G2.0-B.1:
 - no global RNG mutation
 - G2.0-B.1 itself does not require Blender
 
+Verified after G2.0-C:
+- total CPU unittest suite: 98 tests passed
+- 62 pre-existing tests preserved
+- 36 new G2.0-C tests
+- no existing source files modified
+- new files:
+  - spatialforge/environment/relation.py
+  - tests/test_spatial_truth_engine.py
+- camera-frame left / right / aligned
+- camera-frame above / below / aligned
+- signed-depth front / behind / same_depth
+- Euclidean camera-distance nearer / farther / equidistant
+- metric object-to-object distance preserved as world-invariant truth
+- SceneState.objects tuple index is authoritative object identity (duplicate names supported)
+- behind-camera objects retained and flagged with in_front_of_camera
+- deterministic pair ordering
+- deterministic JSON-compatible SpatialTruthRecord serialization
+- finite non-negative eps validation
+- center-based semantics only; no image-plane projection / occlusion / bbox / visibility / QA logic in this gate
+- G2.0-C itself does not require Blender
+
 NEXT IMPLEMENTATION:
-G2.0-C View-Conditioned Spatial Truth Engine
+G2.0-D Multi-view QA Curriculum (NOT started)
 ```
 
 环境说明：
@@ -1590,15 +1698,18 @@ G2.0-C View-Conditioned Spatial Truth Engine
 - AMD Radeon Developer Cloud 已从当前开发工作流停用（其 One-click 池无法满足最低 GPU 资源请求）
 - 当前开发 / 计算环境为 AutoDL 实例（远程 Linux / CUDA）
 - OpenCode CLI 直接运行在 AutoDL 实例上；本地机器为控制 / 协调端
+- AutoDL 当前承担 CPU / code 工作；计划用于 CUDA / GPU workloads
+- Blender 在本 AutoDL 实例仍未安装 / 验证
 - GitHub 仍为长期真源；用户保留 commit / push 最终决策
 
 当前不要做：
 
 - 不要重做 v1
-- 不要重写 G2.0-A / B / B.1
+- 不要重写 G2.0-A / B / B.1 / C
 - 不要把 4 fixed cameras 当最终训练方案
 - 不要直接引入复杂 Agent before camera/truth layers are stable
 - 不要把 God View 暴露给 Agent
+- 不要声称 G2.0-D 已经开始
 
 ---
 
