@@ -3,7 +3,7 @@
 > **文档定位**：跨 AI 项目记忆、当前状态快照、研究路线与工程执行指南。  
 > **不是不可修改的纲领**：其中任何架构、门控、实验和实现细节都可以基于新证据讨论、调整、替换。  
 > **真正需要长期保持一致的内容**：用户原始研究愿景、已经完成并可复现的实验事实、当前 Git 状态、已通过门控、核心边界条件。  
-> **最近更新**：2026-09-04  
+> **最近更新**：2026-09-07
 > **建议仓库路径**：`docs/PROJECT_PLAN_v3.md`  
 > **公开仓库注意**：本文不记录任何私有 SSH 地址、密钥、令牌、API Key、账号凭据或云实例敏感信息。
 
@@ -16,8 +16,8 @@
 ```text
 Project: SpatialForge
 Stage: v2.0 multi-view / spatial experience foundation
-Current development branch: feat/g2.0-c-spatial-truth
-Latest implementation commit: 19e3526
+Current development branch: feat/g2.0-d-qa-curriculum
+Latest implementation commit: 6823f29 feat(g2.0-d): add multiview QA curriculum
 
 Completed:
 - v1 diagnostic + LoRA baseline: CLOSED
@@ -29,6 +29,8 @@ Completed:
   commit: 6d08fcf
 - G2.0-C View-Conditioned Spatial Truth Engine: PASS
   commit: 19e3526
+- G2.0-D Multi-view QA Curriculum: PASS
+  commit: 6823f29
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -54,11 +56,21 @@ Verified after G2.0-C:
   - tests/test_spatial_truth_engine.py
 - G2.0-C itself does not require Blender
 
+Verified after G2.0-D:
+- total CPU unittest suite: 141 tests passed
+- 98 pre-existing tests preserved
+- 43 new G2.0-D tests
+- no existing source files modified
+- new files:
+  - spatialforge/environment/qa.py
+  - tests/test_qa_curriculum.py
+- G2.0-D itself does not require Blender
+
 NEXT:
-- G2.0-D Multi-view QA Curriculum
+- G2.0-E Controlled Training + Transfer Evaluation (NOT started)
 ```
 
-新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
+新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
 
 ---
 
@@ -749,6 +761,115 @@ Blender 不参与本 gate 的 CPU 测试
 
 ---
 
+## 8.5 G2.0-D — Multi-view QA Curriculum ✅
+
+Branch：
+
+```text
+feat/g2.0-d-qa-curriculum
+```
+
+Implementation commit：
+
+```text
+6823f29 feat(g2.0-d): add multiview QA curriculum
+```
+
+新增：
+
+```text
+spatialforge/environment/
+└── qa.py
+
+tests/
+└── test_qa_curriculum.py
+```
+
+形成：
+
+```text
+SpatialTruthRecord (G2.0-C)
+        ↓
+qa.py 课程层
+        ├── CurriculumView / QASample (frozen dataclass)
+        ├── generate_single_view_qa()
+        ├── generate_paired_view_qa()
+        └── generate_multiview_curriculum()
+```
+
+定位：
+
+> 把 G2.0-C 的确定性 spatial truth 转成确定性自然语言训练课程。纯 CPU
+> deterministic data-generation 层。NOT rendering / model training / LLM /
+> projection / FOV / occlusion / visibility / bbox / embodied Agent 层。
+
+已实现语义：
+
+- **Truth consumed, never recomputed**：QA 层只读取 G2.0-C 字段；唯一的几何调用是
+  `generate_multiview_curriculum()` 内的 `compute_spatial_truth()`。不做任何
+  geometry 重复实现。
+- **single-view QA**：固定 family 顺序 horizontal → vertical → depth → near_far；
+  问题模板显式含 "From this view"，答案 left/right、above/below、front/behind、
+  nearer/farther。
+- **paired-view transformation QA**：同 SceneState 双 CameraPose 的 relation
+  变化，如 `left -> right` / `front -> behind` / `nearer -> farther`，显式教学
+  viewpoint transformation。
+- **front-halfspace eligibility policy**：仅当 pair 两个对象在所有相关 view 的
+  `in_front_of_camera == True` 才生成 normal visual QA。文档明确
+  `eligible_for_visual_qa != guaranteed_visible`；本 gate 不做 FOV/occlusion/
+  visibility 声明。
+- **neutral filtering policy**：aligned / same_depth / equidistant 默认排除；
+  `include_neutral=True` 时以其 G2.0-C 精确标签发射，绝不强制二值化。
+- **world-invariant metric-distance controls**：每 eligible pair 附带一条
+  "Does the metric distance between ... change ..." → `unchanged`，tag
+  `world_invariant`，`is_view_dependent=False`；metric_distance 不一致则抛
+  `ValueError`（broken world invariant）。
+- **canonical / jitter / hard-angle tags**：全部由调用方 `CurriculumView.tags`
+  提供并保留，不根据浮点坐标猜测 provenance。
+- **symmetry_flip**：精确逆变换（left↔right / above↔below / front↔behind /
+  nearer↔farther）自动附加 `symmetry_flip`。
+- **size_distance_conflict**：当物理 size 顺序与 camera-distance 顺序冲突
+  （large-far / small-near）时附加 `size_distance_conflict`，只用
+  ObjectTruth.size 元数据。
+- **identity**：对象引用一律 index + name（`object 0 ("red_cube")`），name 不
+  唯一也安全；sample id / ordering 只依赖 index / view id / family，永不依赖
+  name，不用 Python `hash()`。
+- **deterministic IDs / order / serialization**：样本 id 形如
+  `scene:single:view:a-b:family`、
+  `scene:paired:a_view->b_view:a-b:family`、
+  `scene:paired:a_view->b_view:a-b:metric_invariance`；`to_dict()` JSON 兼容且稳定。
+- multiview 输出顺序：input view 顺序的 single-view 块 → 确定性 view 组合
+  (i<j) 的 paired 块（每个 block 内 per-pair family 变换样本 + 该 pair 的
+  invariant control）。
+- 无文件写入核心 API；序列化仅通过 `to_dict()`，JSONL 写入留给未来
+  dataset/export 层。
+- `_validate_same_scene` 拒绝：scene_id 不一致、object 数量不一致、按
+  object_index 的 stable world facts 不一致；multiview 拒绝重复 view_id 与
+  空 view_id。
+
+Counterfactual / curriculum 验证覆盖：
+
+- opposite-view（south vs north / west vs east）relation flips → `left -> right`
+- rotation-only control：viewpoint-dependent QA 改变，metric ordering 不变
+- relocation counterfactual：`nearer -> farther`
+- world-invariant control：object-to-object metric distance 恒为 unchanged，
+  不兼容 truth 被拒绝
+- canonical 6/14/26、seeded jitter、continuous sampled (hard-angle) views
+- symmetry traps、size-distance conflict、duplicate names、determinism、
+  JSON compatibility、精确 ordering lock
+
+验收：
+
+```text
+141 CPU unittest tests passed
+98 pre-existing tests preserved
+43 new G2.0-D tests
+no existing source files modified
+Blender 不参与本 gate 的 CPU 测试
+```
+
+---
+
 # 9. v2.0 后续路线图
 
 ## G2.0-B.1 — Camera Sampling System ✅ DONE
@@ -834,7 +955,9 @@ object identity
 
 ---
 
-## G2.0-D — Multi-view QA Curriculum
+## G2.0-D — Multi-view QA Curriculum ✅ DONE
+
+> 已完成并通过门控（commit 6823f29），见 §8.5。以下保留为历史计划记录。
 
 在真值引擎稳定后，再生成自然语言任务。
 
@@ -863,11 +986,11 @@ View B → relation Y
 - symmetry traps
 - near/far counterfactuals
 - large-far vs small-near
-- occlusion-aware questions（后续）
+- occlusion-aware questions（后续，不在本 gate 范围）
 
 ---
 
-## G2.0-E — Controlled Training + Transfer Evaluation
+## G2.0-E — Controlled Training + Transfer Evaluation 🎯 NEXT
 
 目标：回答第一个 v2 科学问题：
 
@@ -1598,53 +1721,52 @@ spatialforge explorer run
 
 # 27. 近期路线（执行顺序）
 
-> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C 均已通过门控（G2.0-C 见 §8.4）。以下是当前执行顺序。
+> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D 均已通过门控（G2.0-C 见 §8.4，
+> G2.0-D 见 §8.5）。以下是当前执行顺序。
 
-## NEXT 1 — G2.0-D QA Curriculum
+## NEXT 1 — G2.0-E Controlled Training + Transfer Evaluation
 
-> G2.0-C View-Conditioned Spatial Truth Engine 已完成（§8.4）。现在进入 G2.0-D。
+> G2.0-D Multi-view QA Curriculum 已完成（commit 6823f29，见 §8.5）。
+> G2.0-E 尚未开始。
 
-把 relation truth 转成视角条件训练数据。
+回答第一个 v2 科学问题：多视角 / 视角条件训练是否真正改善 orientation，并跨域迁移？
 
-## NEXT 2 — G2.0-E First Multi-view Training Experiment
-
-回答：orientation 能不能移动？
-
-## NEXT 3 — v2.1 Embodied Explorer
+## NEXT 2 — v2.1 Embodied Explorer
 
 把 CameraPose 从系统指定转为 Agent action transition。
 
-## NEXT 4 — World Model Objective
+## NEXT 3 — World Model Objective
 
 动作条件 latent prediction。
 
-## NEXT 5 — v2.2 Active Observation
+## NEXT 4 — v2.2 Active Observation
 
 信息增益驱动的下一步观察。
 
-## NEXT 6 — v2.3 Interactive Object Search
+## NEXT 5 — v2.3 Interactive Object Search
 
 真正实现“找东西 + 遮挡 + 容器交互”。
 
 ---
 
-# 28. 当前暂停点（2026-09-06）
+# 28. 当前暂停点（2026-09-07）
 
-今天工作在 **G2.0-C 门控完成** 处暂停。
+今天工作在 **G2.0-D 门控完成（commit 6823f29）** 处暂停。
 
 正式状态：
 
 ```text
 Branch:
-feat/g2.0-c-spatial-truth
+feat/g2.0-d-qa-curriculum
 
 Latest implementation commit:
-19e3526 feat(g2.0-c): add view-conditioned spatial truth engine
+6823f29 feat(g2.0-d): add multiview QA curriculum
 
 G2.0-A: PASS
 G2.0-B: PASS
 G2.0-B.1: PASS
 G2.0-C: PASS
+G2.0-D: PASS
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -1689,8 +1811,28 @@ Verified after G2.0-C:
 - center-based semantics only; no image-plane projection / occlusion / bbox / visibility / QA logic in this gate
 - G2.0-C itself does not require Blender
 
+Verified after G2.0-D:
+- total CPU unittest suite: 141 tests passed
+- 98 pre-existing tests preserved
+- 43 new G2.0-D tests
+- no existing source files modified
+- new files:
+  - spatialforge/environment/qa.py
+  - tests/test_qa_curriculum.py
+- single-view QA (fixed family order horizontal/vertical/depth/near_far; "From this view")
+- paired-view transformation QA (left -> right / front -> behind / nearer -> farther)
+- front-halfspace eligibility policy (eligible_for_visual_qa != guaranteed_visible)
+- neutral filtering policy (default exclude; include_neutral emits exact G2.0-C labels)
+- world-invariant metric-distance controls (unchanged; broken invariant -> ValueError)
+- caller-provided canonical / jitter / hard-angle tags preserved
+- symmetry_flip on exact-inverse paired transitions
+- size_distance_conflict on large-far / small-near single-view pairs
+- deterministic sample ids / ordering / JSON-compatible to_dict(); no name-as-identity,
+  no Python hash(), no geometry recomputation in QA layer
+- G2.0-D itself does not require Blender
+
 NEXT IMPLEMENTATION:
-G2.0-D Multi-view QA Curriculum (NOT started)
+G2.0-E Controlled Training + Transfer Evaluation (NOT started)
 ```
 
 环境说明：
@@ -1705,11 +1847,12 @@ G2.0-D Multi-view QA Curriculum (NOT started)
 当前不要做：
 
 - 不要重做 v1
-- 不要重写 G2.0-A / B / B.1 / C
+- 不要重写 G2.0-A / B / B.1 / C / D
 - 不要把 4 fixed cameras 当最终训练方案
-- 不要直接引入复杂 Agent before camera/truth layers are stable
+- 不要直接引入复杂 Agent before camera/truth/curriculum layers are stable
 - 不要把 God View 暴露给 Agent
-- 不要声称 G2.0-D 已经开始
+- 不要声称 G2.0-E 已经开始
+- Blender 在本 AutoDL 实例仍未安装 / 验证，G2.0-E 启动前需另行确认渲染环境可用性
 
 ---
 
