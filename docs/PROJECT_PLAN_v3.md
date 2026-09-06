@@ -16,8 +16,8 @@
 ```text
 Project: SpatialForge
 Stage: v2.0 multi-view / spatial experience foundation
-Current development branch: feat/v2.0-camera-geometry
-Current HEAD after G2.0-B commit: 8ced8de
+Current development branch: feat/g2.0-b.1-camera-sampling
+Latest implementation commit: 6d08fcf
 
 Completed:
 - v1 diagnostic + LoRA baseline: CLOSED
@@ -25,17 +25,26 @@ Completed:
   commit: ddf1594
 - G2.0-B Multi-view Scene Renderer: PASS
   commit: 8ced8de
+- G2.0-B.1 Camera Sampling System: PASS
+  commit: 6d08fcf
 
-Verified current test state after G2.0-B:
-- 24 tests passed
+Verified after G2.0-B (historical, preserved):
+- 24 tests passed at that gate
 - Blender 4-view smoke render passed
+- 4 corrected images generated
 - manifest schema passed
 - broken `scene_scene_000_*` naming eliminated
 
+Verified after G2.0-B.1:
+- total CPU unittest suite: 62 tests passed
+- G2.0-B 4-view regression preserved (API unchanged, no existing source files modified)
+- canonical 6-axis / 14-view / 26-view sampling added
+- seeded jitter + continuous uniform-sphere sampling added
+- G2.0-B.1 itself does not require Blender
+
 NEXT:
-- G2.0-B.1 Camera Sampling System
-  canonical 6 / 14 / 26 viewpoints + training jitter / continuous sampling
-- then G2.0-C View-Conditioned Spatial Truth Engine
+- G2.0-C View-Conditioned Spatial Truth Engine
+- then G2.0-D Multi-view QA Curriculum
 ```
 
 新 AI **不要重做** G2.0-A / G2.0-B，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
@@ -596,9 +605,69 @@ G2.0-B 的定位：
 
 ---
 
+## 8.3 G2.0-B.1 — Camera Sampling System ✅
+
+Commit：
+
+```text
+6d08fcf feat(g2.0-b.1): add camera sampling system
+```
+
+新增：
+
+```text
+spatialforge/environment/
+└── sampling.py
+
+tests/
+└── test_camera_sampling.py
+```
+
+形成：
+
+```text
+Canonical directions (6-axis / 14-view / 26-view)
+    ↓
+deterministic CameraPose
+    ↓
+seeded bounded jitter
+    ↓
+continuous uniform sphere sampling
+```
+
+核心能力：
+
+- canonical 6-axis / 14-view / 26-view direction sets，ID 与顺序完全确定
+- camera-offset 方向约定：`position = target + radius * normalize(d)`，`look_at = target`
+- 6-axis 顺序：east → west → north → south → up → down
+- 14-view = 6 axes + 8 cube corners；26-view = 6 axes + 12 edge directions + 8 corners
+- 垂直 / 近垂直视角的稳定 up-vector fallback（`(0,1,0)`），保证 `camera_basis()` 有效
+- seeded bounded jitter（angular cone / radius / true radial target，全部本地 RNG）
+- 不修改全局 RNG 状态
+- 纯 CPU，无 `bpy` 依赖
+- 未修改 / 删除既有 4-view API，G2.0-B 回归保持
+
+验收：
+
+```text
+62 CPU unittest tests passed
+G2.0-B 回归保留（VIEW_IDS 与 generate_cardinal_views 不变）
+无既有 source 文件被 G2.0-B.1 修改
+Blender 不参与本 gate 的 CPU 测试
+```
+
+G2.0-B.1 的定位：
+
+> 把固定 4-view smoke camera 升级为可复用的 diagnostic / curriculum 相机采样系统；
+> canonical 视角是可复现的坐标骨架，训练期仍应叠加 jitter / continuous sampling。
+
+---
+
 # 9. v2.0 后续路线图
 
-## G2.0-B.1 — Camera Sampling System（NEXT）
+## G2.0-B.1 — Camera Sampling System ✅ DONE
+
+> 已完成并通过门控，见 §8.3。以下保留为历史计划记录。
 
 目标：把当前 4-view smoke camera 升级成可复用采样系统。
 
@@ -1083,44 +1152,37 @@ Renderer Adapter
 
 ## 19.1 本地 Windows
 
-角色：**主开发环境**。
+角色：**用户侧控制 / 协调环境**。
 
 负责：
 
-- VS Code / OpenCode CLI
-- Git
-- CPU tests
-- small Blender smoke renders
-- schema / geometry / QA development
-- local review
+- 用户控制与协调
+- Git 决策（commit / push / merge 节奏）
+- 本地 review
+- 需要时可运行轻量级检查（例如快速 CPU 验证 / 代码审查）
 
-## 19.2 AMD Radeon Cloud
+说明：当前 OpenCode CLI 直接运行在 AutoDL 实例上。本地 Windows 仍是用户侧控制 / 协调端；当有用时，本地仍可运行轻量级检查，并不被禁止运行测试或 Blender。
 
-当前结论：不适合作为日常开发工作站。
+## 19.2 AMD Radeon Developer Cloud — 当前开发工作流中停用
 
-原因：
+**已在当前开发工作流中停用。** 原因：其 One-click 池无法分配最低 GPU 资源请求，无法支撑当前开发。
 
-- 实例启动摩擦
-- Jupyter connection instability
-- GitHub HTTPS proxy / CA friction
+说明：
 
-后续仅作为可选计算节点：
+- 当前执行后端为 AutoDL / CUDA。
+- SpatialForge 本身保持 **计算后端无关**（CUDA / ROCm 都只是执行后端）；这**不代表永久禁止** ROCm / AMD 支持。
+- 若未来 AMD 节点可用并满足资源需求，可重新评估其作为可选计算节点。
 
-- large rendering
-- ROCm training
-- batch inference
+## 19.3 AutoDL（CUDA Cloud）— 当前默认远程执行环境
 
-使用原则：
+- AutoDL 是当前主要 / 默认的远程执行环境（Linux / CUDA）。
+- OpenCode CLI 直接运行在 AutoDL 实例上。
+- AutoDL 当前承担 CPU / code 工作（CPU tests、代码开发等）。
+- AutoDL 计划用于 CUDA / GPU workloads（LoRA / evaluation / inference）。
+- Blender work 计划在 AutoDL 上运行，但 Blender 目前尚未在本实例安装 / 验证（此前 pre-flight 检测为 `blender: command not found`）；待安装并验证后再启用。
+- 本地 Windows 是用户侧控制 / 协调环境；需要时可运行轻量级检查。
 
-> 云服务器是计算节点，不是工作站。
-
-## 19.3 CUDA Cloud / AutoDL 类节点
-
-作为稳定 fallback：
-
-- LoRA
-- evaluation
-- model inference
+说明：更早的 G2.0-B Blender 4-view smoke render 已在上一环境中通过（历史事实保留，见 §8.2）。
 
 ## 19.4 GPU 时间纪律
 
@@ -1136,6 +1198,8 @@ Renderer Adapter
 ---
 
 # 20. ROCm 纪律
+
+> 当前开发工作流未使用 AMD 节点（见 §19.2）。如未来重新启用 AMD / ROCm 节点，遵循以下纪律。
 
 AMD 节点：
 
@@ -1194,6 +1258,15 @@ AMD 节点：
 # 22. AI 协作与开发流程（当前实际工作流）
 
 原“一切用户手动执行”策略已更新。
+
+当前执行环境：
+
+- OpenCode CLI 直接运行在 AutoDL 实例（远程 Linux / CUDA）上
+- 当前 OpenCode 版本：1.18.29
+- 当前执行模型：DeepSeek V4 Flash · low
+- 本地机器是用户侧控制 / 协调端
+- GitHub 仍是代码 / 文档长期真源
+- 用户保留最终 commit / push 决策
 
 ## 22.1 角色划分
 
@@ -1437,86 +1510,92 @@ spatialforge explorer run
 
 # 27. 近期路线（执行顺序）
 
-## NEXT 1 — G2.0-B.1 Camera Sampling System
+## NEXT 1 — G2.0-C View-Conditioned Spatial Truth Engine
 
-不要直接上 Agent。
+> G2.0-B.1 Camera Sampling System 已完成（§8.3）。现在进入 G2.0-C。
 
-先把 diagnostic / curriculum camera sampling 做成正确的连续空间工具：
+目标：让任意 CameraPose 都能得到正确 relation labels。
 
-```text
-4 cardinal
-6 axis
-14 subset
-26 lattice
-jitter
-continuous sample
-```
-
-## NEXT 2 — G2.0-C View-Conditioned Spatial Truth
-
-让任意 CameraPose 都能得到正确 relation labels。
-
-## NEXT 3 — G2.0-D QA Curriculum
+## NEXT 2 — G2.0-D QA Curriculum
 
 把 relation truth 转成视角条件训练数据。
 
-## NEXT 4 — G2.0-E First Multi-view Training Experiment
+## NEXT 3 — G2.0-E First Multi-view Training Experiment
 
 回答：orientation 能不能移动？
 
-## NEXT 5 — v2.1 Embodied Explorer
+## NEXT 4 — v2.1 Embodied Explorer
 
 把 CameraPose 从系统指定转为 Agent action transition。
 
-## NEXT 6 — World Model Objective
+## NEXT 5 — World Model Objective
 
 动作条件 latent prediction。
 
-## NEXT 7 — v2.2 Active Observation
+## NEXT 6 — v2.2 Active Observation
 
 信息增益驱动的下一步观察。
 
-## NEXT 8 — v2.3 Interactive Object Search
+## NEXT 7 — v2.3 Interactive Object Search
 
 真正实现“找东西 + 遮挡 + 容器交互”。
 
 ---
 
-# 28. 当前暂停点（2026-09-04）
+# 28. 当前暂停点（2026-09-06）
 
-今天工作在**项目规划完成**处暂停。
+今天工作在 **G2.0-B.1 门控完成** 处暂停。
 
 正式状态：
 
 ```text
 Branch:
-feat/v2.0-camera-geometry
+feat/g2.0-b.1-camera-sampling
 
-Latest commits:
-8ced8de feat(g2.0-b): add multiview scene rendering pipeline
-  parent:
-ddf1594 feat(v2.0): add camera geometry core
+Latest implementation commit:
+6d08fcf feat(g2.0-b.1): add camera sampling system
 
 G2.0-A: PASS
 G2.0-B: PASS
+G2.0-B.1: PASS
 
-Verified after G2.0-B:
-- 24 tests passed
+Verified after G2.0-B (historical, preserved):
+- 24 tests passed at that gate
 - Blender 4-view smoke render passed
 - 4 corrected images generated
-- manifest generated under outputs/synth/manifests/
-- complete CameraPose metadata
-- relative portable image paths
-- no broken scene_scene_000 artifacts
+- manifest schema passed
+- broken `scene_scene_000_*` naming eliminated
+
+Verified after G2.0-B.1:
+- total CPU unittest suite: 62 tests passed
+- G2.0-B 4-view regression preserved
+- no existing source files modified by G2.0-B.1
+- new files:
+  - spatialforge/environment/sampling.py
+  - tests/test_camera_sampling.py
+- canonical 6-axis / 14-view / 26-view sampling added
+- deterministic canonical IDs/order
+- stable vertical / near-vertical up-vector fallback
+- seeded bounded camera jitter + true radial target jitter
+- continuous uniform sphere sampling
+- no global RNG mutation
+- G2.0-B.1 itself does not require Blender
 
 NEXT IMPLEMENTATION:
-G2.0-B.1 Camera Sampling System
+G2.0-C View-Conditioned Spatial Truth Engine
 ```
+
+环境说明：
+
+- AMD Radeon Developer Cloud 已从当前开发工作流停用（其 One-click 池无法满足最低 GPU 资源请求）
+- 当前开发 / 计算环境为 AutoDL 实例（远程 Linux / CUDA）
+- OpenCode CLI 直接运行在 AutoDL 实例上；本地机器为控制 / 协调端
+- GitHub 仍为长期真源；用户保留 commit / push 最终决策
 
 当前不要做：
 
 - 不要重做 v1
-- 不要重写 G2.0-A / B
+- 不要重写 G2.0-A / B / B.1
 - 不要把 4 fixed cameras 当最终训练方案
 - 不要直接引入复杂 Agent before camera/truth layers are stable
 - 不要把 God View 暴露给 Agent
