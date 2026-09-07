@@ -3,7 +3,7 @@
 > **文档定位**：跨 AI 项目记忆、当前状态快照、研究路线与工程执行指南。  
 > **不是不可修改的纲领**：其中任何架构、门控、实验和实现细节都可以基于新证据讨论、调整、替换。  
 > **真正需要长期保持一致的内容**：用户原始研究愿景、已经完成并可复现的实验事实、当前 Git 状态、已通过门控、核心边界条件。  
-> **最近更新**：2026-09-07
+> **最近更新**：2026-09-08
 > **建议仓库路径**：`docs/PROJECT_PLAN_v3.md`  
 > **公开仓库注意**：本文不记录任何私有 SSH 地址、密钥、令牌、API Key、账号凭据或云实例敏感信息。
 
@@ -17,7 +17,7 @@
 Project: SpatialForge
 Stage: v2.0 multi-view / spatial experience foundation
 Current development branch: feat/g2.0-d-qa-curriculum
-Latest implementation commit: cf2fb52 feat(g2.0-e1): add controlled multiview experiment data foundation
+Latest implementation commit: f4a0089 perf(g2.0-e3.3a5): add GPU training performance profiles
 
 Completed:
 - v1 diagnostic + LoRA baseline: CLOSED
@@ -33,6 +33,14 @@ Completed:
   commit: 6823f29
 - G2.0-E1 Controlled Multiview Experiment Data & Rendering Foundation: PASS / CLOSED
   commit: cf2fb52
+- G2.0-E2 Controlled Training Harness & Pipeline Verification: PASS / CLOSED
+  commit: ada1179
+- G2.0-E3.1 Evaluation Hardening & Experiment Protocol Freeze: PASS / CLOSED
+  commit: c494e26, 6553d17
+- G2.0-E3.2 Controlled Engineering Experiment Runner: PASS / CLOSED
+  commit: af77949
+- G2.0-E3.3A GPU Training Optimization & Performance Profiles: PASS / CLOSED
+  commit: f4a0089
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -93,11 +101,41 @@ Verified after G2.0-E1:
 - bit-for-bit build determinism verified (identical SHA-256 hashes across repeated generation)
 - holdout S1 (cardinal, N=1136) and S2 (jitter, N=1136) materialized and disjoint from train
 
+Verified after G2.0-E2:
+- total unittest suite: 188 tests passed (181 pre-existing + 7 regression tests)
+- commit: ada1179
+- strict language-model-only LoRA: 252 LM modules, 0 vision modules, 14,966,784 trainable params
+- Qwen2.5-VL-3B bf16 LoRA pipeline verified end-to-end on AutoDL RTX 4080 SUPER
+- formal gradient accumulation semantics: MB1 x ACC8, 1552 samples -> 194 optimizer steps / epoch
+
+Verified after G2.0-E3.1 / G2.0-E3.2:
+- total unittest suite: 227 tests passed (commits: c494e26, 6553d17, af77949)
+- strict directional/yesno parser hardening verified against adversarial strings
+- deterministic SHA-256 config freeze & run manifest provenance architecture implemented
+- controlled engineering experiment runner verified (scripts/run_engineering_experiment.py)
+
+Verified after G2.0-E3.3A (GPU Training Optimization & Performance Profiles):
+- total unittest suite: 241 / 241 tests passed (commit: f4a0089)
+- Frozen Vision Feature Cache eliminating redundant vision forward passes
+- gradient checkpointing disabled for high-throughput cached-vision training paths
+- mathematically controlled cached-vision batching with exact right-padding & loss masking (-100)
+- 3 first-class execution profiles: reference (MB1xACC8), balanced (MB2xACC4), max_performance (MB4xACC2)
+- development default: max_performance (explicit project decision)
+- strict "No Silent Fallback" capability preflight check raising ProfileCapabilityError
+- full 1552-sample P7 soak completed on Group A seed 42:
+  - wall time: 182.2 s = 3.04 min (vs historical 27.88 min reference baseline, 9.18x speedup)
+  - throughput: 8.519 samples/s (vs historical 0.928 samples/s)
+  - GPU utilization: 96.2% average, 100.0% p99 (vs historical ~24.9%)
+  - average power: 241.1 W, average SM clock: ~2767 MHz
+  - peak torch allocated: ~20.96 GB, peak torch reserved: ~22.58 GB
+  - PyTorch caching-allocator reserved capacity reached a stable plateau; 0 monotonic GPU or host leak
+  - sample-based training progress accounting (1552/1552 samples, 194/194 optimizer steps)
+
 NEXT:
-- G2.0-E3 Formal Controlled Training & Transfer Evaluation (NOT started)
+- 3D God View / Research Inspector (God View Workbench, §14 / §26)
 ```
 
-新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
+新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1 / G2.0-E2 / G2.0-E3.3A，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
 
 ---
 
@@ -1245,54 +1283,138 @@ View B → relation Y
 2. **F2 梯度累积语义缺失**：初版烟测直接单步 backward 即 step，缺乏 formal 累积语义。在审查中被拦截，重构为微批次梯度缩放（`loss / 8`）、每 8 步执行 1 次 optimizer+scheduler step 的可复用训练循环，并补充启用梯度检查点与线性调度器。
 
 ### E3 待办与非阻塞积压事项（Non-blocking Backlog for E3）
-- 正式评估前加固 directional / yes-no 解析器（避免 `"not left"` 等被子串逻辑误判）。
-- 将单元测试中的局部张量切片测试重构为直接覆盖生产路径 `build_training_tensors`。
+- 正式评估前加固 directional / yes-no 解析器（已在 E3.1 完成）。
+- 消除训练循环中的冗余计算与瓶颈（已在 E3.3A 完成，达成 9.18x 加速）。
 - 明确认知：S2 为同扰动过程泛化，而非连续球面上强连续 OOD。
 - 相机 FOV 元数据 vs Blender 实际 ~54.4° 差异留待未来投影/可见性工作统一对齐。
 
 ---
 
-## G2.0-E3 — Formal Controlled Training & Transfer Evaluation 🎯 NEXT
+## G2.0-E3.1 — Evaluation Hardening & Experiment Protocol Freeze ✅ PASS / CLOSED
 
-目标：回答第一个 v2 科学问题：
+- **交付成果**：
+  - 严格词边界定向/判定答案解析器（`spatialforge/experiment/evaluation.py`），消除子串误判。
+  - 不可变协议常量、SHA-256 数据集哈希校验与前置检查器（`spatialforge/experiment/protocol.py`）。
+  - 10 项严格前置检查防线（数据集完整性、基模版本锁定、场景划分隔离、LoRA 目标白名单、确定性配置冻结）。
+- **实施 Commit**：`c494e26`, `6553d17`。
+- **测试状态**：201 / 201 PASS。
 
-> 多视角 / 视角条件训练是否真正改善 orientation，并跨域迁移？
+---
 
-### 经济高效的执行顺序（E3 启动原则）
-1. **加固正式评估器与解析器**：加固 directional / yes-no 答案抽取与词边界保护。
-2. **冻结实验配置**：严格遵循 E2 冻结语义（lr=1e-4, accum=8, 1 epoch, linear scheduler, warmup=0）。
-3. **运行 Baseline B 零样本评测**：评估未经微调的基模在 S1, S2, VSR 上的基线能力。
-4. **单 seed 工程验证（seed=42）**：先跑 Control A, Treatment C, Treatment D 的单个工程 seed，验证训练与评测流水线耗时与产出。
-5. **指标与资源审查**：验证训练平稳收敛、checkpoint 保存与评估指标产出。
-6. **多 seed 完整扩展**：在流水线完全确认可靠后，方可扩展执行 seed=123 与 seed=456，完成统计显著性矩阵。
+## G2.0-E3.2 — Controlled Engineering Experiment Runner ✅ PASS / CLOSED
 
-对照设计：
+- **交付成果**：
+  - 端到端受控工程实验执行脚本：`scripts/run_engineering_experiment.py`。
+  - 全流程 4 条件（Baseline B 零样本、Control A42、Treatment C42、Treatment D42）配置预先冻结与 SHA-256 哈希固化。
+  - Baseline B 零样本评测与训练-评估流水线验证。
+  - 确定性对齐与因果增量计算（`A_minus_B`, `C_minus_B`, `D_minus_B`, `C_minus_A`, `D_minus_A`, `D_minus_C`）。
+- **实施 Commit**：`af77949`。
+- **测试状态**：227 / 227 PASS。
 
-```text
-Baseline B: pretrained baseline (no fine-tuning)
-Control A: fixed south view (single-image QA)
-Treatment C: 4 canonical horizontal views (south, east, north, west)
-Treatment D: 4 canonical + 4 bounded jitter views
-```
+---
 
-评测矩阵：
+## G2.0-E3.3A — GPU Training Optimization & Performance Profiles ✅ PASS / CLOSED
 
-- 合成 Holdout S1（未见场景正交视角）
-- 合成 Holdout S2（未见场景扰动视角）
-- VSR Direct Transfer (`left_right`, `front_back`)
-- VSR Broad Orientation（历史宽泛定向关系）
-- near_far
-- count
-- 其他维度稳定性
+> 已完成并通过终验，单条件完整训练耗时由 **27.88 分钟压缩至 3.04 分钟（9.18x 实测加速）**，平均 GPU 利用率由 **~24.9% 提升至 96.2%**。241 / 241 单元测试全通。
 
-优先观察：
+### 1. 最终验证的 8 项核心工程成果（Final Implementation Artifacts）
+1. **Frozen Vision Feature Cache**：针对不可变图像预先提取并缓存视觉嵌入，彻底消除重复的冻结视觉编码器前向耗时。
+2. **禁用梯度检查点（GC Disabled for Performance Profiles）**：在显存裕量充分的单卡环境中关闭梯度检查点，消除重算开销。
+3. **数学受控的 Cached-Vision 批处理（Mathematically Controlled Batching）**：在 post-vision 特征阶段执行微批次右填充（mask=0, label=-100），实现完全一致的等样本加权损失（per-example loss），在数学上精确对齐单样本参考损失。
+4. **显式训练执行 Profile（Explicit Training Performance Profiles）**：产品化规范三级第一类 Profile（`reference`, `balanced`, `max_performance`）。
+5. **实时 NVML / PyTorch 遥测系统（Real-time Telemetry Sampler）**：后台独立线程按 0.2s 采样 GPU 利用率、功耗、显存使用及 SM 时钟频率（avg, min, max, p99）。
+6. **样本基准进度核算（Sample-based Progress Accounting）**：进度条、ETA 与心跳严格基于物理样本数（1552）而非微批次数（388）。
+7. **Profile 算力前置校验（Capability Preflight Check）**：在训练启动前严格比对当前硬件 VRAM 与 Profile 需求。
+8. **严禁静默降级策略（No-Silent-Fallback Policy）**：硬件不足时强制抛出 `ProfileCapabilityError` 阻断执行，提供适配建议，杜绝破坏实验一致性的静默退化。
 
-```text
-orientation ↑
-其他维度不显著退化
-```
+- **实施 Commit**：`f4a0089`（基准 commit：`5ad40fd`）。
 
-如果仅 synthetic orientation 上升而 VSR 无迁移，应明确记录为 domain-specific fitting，而不能宣称获得通用 3D reasoning。
+### 2. 性能演进与全量浸泡压测事实（Exact Performance Progression & P7 Full Soak）
+
+| 执行阶段 / Profile | 微批次 (MB) | 累积步数 (ACC) | 有效批次 | 视觉重算 | 梯度检查点 | 1552 样本耗时 | 吞吐率 (sps) | 相对基准加速比 | 平均 GPU 利用率 | 峰值 Alloc | 峰值 Reserved | 状态 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **历史 E3.2 参考基准** | 1 | 8 | 8 | 是 (每次重算) | 开启 | 27.88 min (1673s) | 0.928 | 1.00x | ~24.9% | 8.31 GB | 8.31 GB | 历史对比基线 |
+| **Validated P5 / Reference** | 1 | 8 | 8 | 否 (特征缓存) | 关闭 | ~8.01 min (480s) | 3.230 | 3.48x | ~39.6% | 9.78 GB | 10.05 GB | 复现/调试保留 |
+| **Validated P6 / Balanced** | 2 | 4 | 8 | 否 (特征缓存) | 关闭 | ~4.75 min (285s) | 5.440 | 5.86x | ~56.0% | 14.35 GB | 15.20 GB | 均衡安全规格 |
+| **Validated P7 / Max Performance** | **4** | **2** | **8** | **否 (特征缓存)** | **关闭** | **3.04 min (182.2s)** | **8.519** | **9.18x** | **96.2%** | **20.96 GB** | **22.58 GB** | **全量浸泡验收** |
+
+> **注**：加速比 9.18x 为全量 1552 样本端到端实测值，严禁四舍五入为模糊的“~9x”。
+
+#### P7 全量 1552 样本单 Epoch 浸泡测试数据（Group A, Seed 42）
+- **样本处理数**：1552 / 1552
+- **优化器步数**：194 / 194
+- **调度器步数**：194 / 194
+- **端到端训练耗时**：182.2 s = **3.04 min**（优于 $\le 3.8\text{ min}$ 目标，达成 $\le 3.4\text{ min}$ 优秀线）
+- **实测吞吐率**：**8.519 samples/s**
+- **GPU 平均利用率**：**96.2%**（峰值 p99: **100.0%**）
+- **平均板卡功耗**：**241.1 W**
+- **平均 SM 时钟**：**~2767 MHz**
+- **峰值 Torch Allocated 显存**：**20.96 GB**
+- **峰值 Torch Reserved 显存**：**22.58 GB**
+- **训练收敛轨迹**：初始 loss 4.2417 $\to$ 最终 loss 0.0269（前 10 步均值 2.1902 $\to$ 后 10 步均值 0.0408，无 NaN/Inf）
+- **单元测试状态**：**241 / 241 PASS**。
+
+### 3. 显存稳定性与规范术语说明（Memory Stability & Terminology）
+- **规范用语**：严禁将 `reserved - allocated` 描述为确定性的 CUDA 显存“碎片（fragmentation）”。其准确术语为 **PyTorch 缓存分配器保留容量 / 常驻复用内存池（PyTorch caching-allocator reserved capacity / retained allocation pool）**。
+- **7 点显存检查点实测证明**：
+  - `model_loaded`: Alloc 7,218.5 MB | Res 7,294.0 MB | Host RSS 960.1 MB
+  - `cache_ready`: Alloc 7,219.8 MB | Res 7,294.0 MB | Host RSS 3,530.8 MB
+  - `first_optimizer_update` (Step 1): Alloc 7,834.3 MB | Res 23,084.0 MB | Host RSS 4,248.8 MB
+  - `progress_25_pct` (Step 48.5): Alloc 7,891.4 MB | Res 23,120.0 MB | Host RSS 4,317.1 MB
+  - `progress_50_pct` (Step 97): Alloc 7,834.3 MB | Res 23,120.0 MB | Host RSS 4,317.2 MB
+  - `progress_75_pct` (Step 145.5): Alloc 7,891.4 MB | Res 23,120.0 MB | Host RSS 4,317.4 MB
+  - `progress_100_pct` (Step 194): Alloc 7,834.3 MB | Res 23,120.0 MB | Host RSS 4,317.5 MB
+- **稳定性结论**：
+  - 显存分配进入稳定平台期（Plateau）：25% 到 100% 阶段 Allocated 仅在 7,834 MB 与 7,891 MB 间随序列长度 padding 波动（漂移仅 57.09 MB）；Reserved 容量**严格锁定为 23,120.0 MB（漂移 0.0 MB）**。
+  - 宿主机 Host RSS 在训练循环中漂移仅 0.39 MB（4317.13 $\to$ 4317.52 MB）。
+  - **无单调显存泄漏（No monotonic GPU leak），无宿主机泄漏（No host-memory leak），无运行期 OOM**。
+
+### 4. 三级第一类执行 Profile 规范（Frozen Training Profiles）
+1. **REFERENCE (`reference`)**：
+   - 执行参数：MB1 $\times$ ACC8，有效批次 8，GC=False，VC=True。
+   - 估算显存需求：~19,900 MB。
+   - 定位：严格对照复现、代码调试、数值回归验证、超低显存压力环境。
+2. **BALANCED (`balanced`)**：
+   - 执行参数：MB2 $\times$ ACC4，有效批次 8，GC=False，VC=True。
+   - 估算显存需求：~23,550 MB。
+   - 定位：吞吐与显存裕量折中，适用于显存较紧张或共享计算环境（~9.2 GB 裕量）。
+3. **MAX PERFORMANCE (`max_performance`)**：
+   - 执行参数：MB4 $\times$ ACC2，有效批次 8，GC=False，VC=True。
+   - 估算显存需求：~30,900 MB。
+   - 定位：最大化释放 GPU 算力，达成极速迭代（8.519 sps, 96.2% util）。已在当前 32 GB AutoDL 环境完全验证。
+   - **开发默认项（Development Default）**：`max_performance` 为 SpatialForge 显式指定的研发默认 Profile。
+
+### 5. Profile 语义学边界（Profile Semantics & Scientific Boundaries）
+- 三个 Profile 均为 **语义等价执行 Profile（Semantically Equivalent Execution Profiles）**：拥有完全一致的数据集切分、模型架构、LoRA 结构、学习率 ($1\times 10^{-4}$)、调度器、warmup、训练轮数、优化器窗口语义（有效批次恒等于 8）、等样本权重目标及视觉缓存语义。
+- **不宣称严格 Bitwise 等价**：不同微批次结构会改变 CUDA reduction 浮点加法顺序及 Dropout RNG 随机数流的消耗顺序，可能在参数轨迹微观数值上产生极小差异。
+- **因果对照纪律**：正式 A/C/D 科学对照实验必须在全矩阵范围内**统一固定使用单个执行 Profile**（推荐 `max_performance`）。
+
+### 6. 严禁静默降级策略（No-Silent-Fallback Policy）
+- 当用户显式指定 Profile（例如 `--profile max_performance`），若当前硬件环境可用显存无法满足其安全预算：
+  1. 立即中断 preflight；
+  2. 报告请求的 Profile 及其估算显存需求；
+  3. 报告当前环境可用显存；
+  4. 给出向下兼容的推荐 Profile（例如 `balanced` 或 `reference`）；
+  5. 严禁自动/静默降级 Profile，必须将选择权保留给用户。
+
+### 7. 科学与工程结论（Engineering & Scientific Conclusion）
+- 原先 ~24.9% 的低 GPU 利用率**绝非由于硬件算力不足**（单机独立大算力 BF16 GEMM 压测轻松达到 100% 利用率与 282 W 满功耗）。
+- 真正的工程瓶颈在于**执行形态不匹配（MB=1 带来的并行度不足）**与**重复前向冻结视觉编码器**造成的管道空转。
+- 将有用批次扩大至 MB4 并剥离重复视觉编码，成功将闲置 GPU 算力转化为真实吞吐：
+  - 平均利用率：**~24.9% $\to$ 96.2%**
+  - 单组训练耗时：**27.88 min $\to$ 3.04 min**
+  - 样本吞吐率：**0.928 $\to$ 8.519 samples/s**
+- 提升利用率本身不是目的，**压缩迭代延迟与提升真实算力产出**才是目标。
+
+### 8. 运行环境事实与研发能效策略（Execution Environment & Efficiency Policy）
+- **当前验证环境事实**：AutoDL 远程 Linux / CUDA, NVIDIA GeForce RTX 4080 SUPER vGPU 暴露, 32,760 MiB (32 GB) 可见显存, 320 W 标称功耗上限。P7 全量测试数据均基于此环境实测。不保证所有其他 32 GB 硬件展现完全一致的吞吐。
+- **研发能效策略**：在已通过验证的环境中，SpatialForge 研发与实验应默认采用 `max_performance` Profile，以缩短研究迭代延迟、节省计算开销。质量门控与因果设计标准保持不变。
+
+---
+
+## G2.0-E3 Formal Controlled Training — 后续科学矩阵执行规划
+
+在 GPU 优化闭环后，G2.0-E3 正式因果对照实验（Multi-seed A/C/D 矩阵：seeds 42, 123, 456）将统一依托已冻结的 `max_performance` Profile 执行。在启动大规模 multi-seed 矩阵前，优先交付下一阶段关键工程基础设施：**3D God View / Research Inspector**。
 
 ---
 
@@ -1445,76 +1567,111 @@ State_t + open(cabinet) -> State_t+1
 
 ---
 
-# 14. God View / Human Evaluation Workbench
+# 14. 3D God View / Research Inspector (God View Workbench, §14 / §26)
 
-SpatialForge 最终应该提供一个真正可视化的“上帝视角工作台”。
+> **当前状态**：**IMMEDIATE NEXT GATE（G2.0-E3.3A GPU 优化闭环后的当前首要实施门控）**。<br>
+> **定位**：从静态脚本与指标输出跃迁为可交互、可归因、可深度调试的 3D 科学检视器与评估基座。
 
-## 14.1 目标界面
+---
+
+## 14.1 核心科学边界（Critical God View Scientific Boundary）
+
+> [!CRITICAL]
+> **God View 特权真值严禁暴露给 Agent（Non-Negotiable Boundary）**：
+> - God View 仅服务于：环境权威真值（Environment Truth）、真实渲染（Rendering）、监督判卷（Supervision）、研究员人工检视（Human Inspection）、错误归因调试（Debugging）与科研可视化（Research Visualization）。
+> - **God View 真值绝对不能作为模型输入暴露给最终具身 Agent（God View truth MUST NEVER be exposed to the final embodied Agent as model input）**。
+> - 最终 Agent 仅允许消费其合法的传感器受限观测（permitted observations，如相机第一视角 RGB、受限位姿或本体感知）。
+> - 此科学边界不可动摇、绝无协商余地。God View 扮演的是“外部科学观察者与评估裁判”，绝非全知的模型输入通道。
+
+---
+
+## 14.2 下一阶段门控设计意图（Next-Gate Design Intent）
+
+研究检视器（Research Inspector）的根本设计意图是使研究人员能够清晰追踪并可视化以下因果决策链：
 
 ```text
-┌──────────────────────────────────────────────────────┐
-│                     GOD VIEW                         │
-│                                                      │
-│  objects / rooms / containers                        │
-│  Agent ● → trajectory                                │
-│  camera frustum                                      │
-│  selected next viewpoint                             │
-│                                                      │
-├───────────────────────┬──────────────────────────────┤
-│   AGENT FIRST PERSON  │       REASONING STATE        │
-│                       │                              │
-│   current RGB/view    │ Question / Goal             │
-│                       │ Confidence / Entropy         │
-│                       │ Next action                  │
-├───────────────────────┴──────────────────────────────┤
-│ timeline: O0 → A0 → O1 → A1 → O2 ...                │
-└──────────────────────────────────────────────────────┘
+SCENE TRUTH (3D 世界几何真值)
+  └──> CAMERA / OBSERVATION (视锥与传感器采集成像)
+        └──> MODEL INPUT (多模态 Prompt / 视觉特征)
+              └──> MODEL PREDICTION (语言模型空间输出)
+                    └──> CORRECT SPATIAL TRUTH (几何引擎真值判卷)
+                          └──> ERROR / SUCCESS (成功 / 失败因果归因)
 ```
 
-## 14.2 God View 显示内容
+面向后续具身探索与主动交互阶段，因果链将自然延展为：
 
-- 完整场景布局
-- Agent position / heading
-- current camera frustum
-- trajectory
-- next selected action / viewpoint
-- visible objects
-- occluded objects
-- hidden target location
-- observation history
-- model answer
-- confidence / uncertainty
-- optional ground truth overlay
+```text
+AGENT STATE ──> OBSERVATION ──> DECISION ──> ACTION ──> NEW OBSERVATION
+```
 
-## 14.3 判卷策略
+> **注意**：God View 在当前门控中主要服务于合成场景、视锥、观测与模型预测的对比检视与误差诊断。严禁在当前阶段过度设计或提前实现未经验证的复杂主动交互逻辑。
 
-### 自动判卷
+---
 
-适合可由引擎精确确定的任务：
+## 14.3 门控核心实施焦点（10 Focus Items）
 
-- left/right
-- depth
-- distance
-- visibility
-- occlusion
-- collision
-- object identity
-- target reached
+作为当前 IMMEDIATE NEXT GATE，3D God View / Research Inspector 聚焦以下 10 项核心能力：
 
-### 人工判卷
+1. **合成场景可交互 3D 上帝视角（Interactive 3D God View of Synthetic Scenes）**：支持三维场景几何结构、物体与房间布局的实时自由漫游与交互检视。
+2. **权威环境/世界状态可视化（Authoritative Environment / World-State Visualization）**：精确展示全局几何坐标系、物体边界盒、可见性与空间关系事实。
+3. **相机与视锥体可视化（Camera / Frustum Visualization）**：高保真呈现各相机位姿、视锥体（Frustum）投影与可视截锥空间。
+4. **并列同显主视角（Observed Camera View Alongside God View）**：在上帝视角旁同步渲染展示 Agent 当前所处视角的实际 RGB 观测图像。
+5. **物体身份与空间关系检视（Object Identity & Spatial Relation Inspection）**：检视各物体的语义标签、空间坐标及成对拓扑关系（左/右、前/后、距离等）。
+6. **模型预测与几何真值比对（Model Question / Prediction / Ground-Truth Comparison）**：直观对照给出的空间问答题目、模型实时推断答案与引擎判卷几何真值。
+7. **AI 观测与动作轨迹溯源（AI Observation / Action Trace Visualization）**：在涉及多步行为或探索时，完整复现观测-决策-位姿轨迹。
+8. **实时训练/推理遥测集成（Live Training / Inference Telemetry Integration）**：集成展示 NVML / PyTorch 实时硬件指标（GPU 利用率、显存分配、功耗、时钟）与系统吞吐。
+9. **训练 Profile 选择器集成（Training Profile Selector Integration）**：UI 规范层面集成 `reference` / `balanced` / `max_performance` 三级 Profile 切换与预检展示。
+10. **研究员人工检视与错误诊断（Human Research Inspection & Error Diagnosis）**：为研究员提供定位模型“假对”（碰巧猜中）与典型空间幻觉的交互式分析手段。
 
-适合高层行为：
+---
 
-- 搜索策略是否合理
-- 是否真正使用历史记忆
-- 是否存在碰巧猜中
-- 是否选择了高信息量视角
-- 是否绕路过多
-- 是否形成稳定的空间解释
+## 14.4 目标界面原型（Target Interface Layout）
 
-因此最终评估不是“全人工”也不是“全自动”，而是：
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        3D GOD VIEW (WORLD TRUTH)                       │
+│                                                                        │
+│   ● Scene objects / bounding boxes / relations                         │
+│   ▲ Agent position / heading / trajectory history                      │
+│   ◺ Current camera frustum (field of view)                             │
+│   ◌ Candidate next viewpoints / actions                                │
+│                                                                        │
+├───────────────────────────┬────────────────────────────────────────────┤
+│    AGENT OBSERVATION      │          REASONING & TELEMETRY             │
+│                           │                                            │
+│    Current Camera RGB     │  Question: "Is red cube left of sphere?"   │
+│    (Permitted Input)      │  Prediction: "yes" (Confidence: 0.94)      │
+│                           │  Truth: "yes" [CORRECT]                    │
+│                           ├────────────────────────────────────────────┤
+│                           │  Profile: [max_performance ▼]              │
+│                           │  GPU: 96.2% | VRAM: 20.96G / 32G | 241W    │
+│                           │  Throughput: 8.52 sps | ETA: 182s          │
+├───────────────────────────┴────────────────────────────────────────────┤
+│ Timeline: O0 → A0 (South) → O1 → A1 (East) → O2 (Evaluated) ...        │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-> **自动 Ground Truth + Human Supervisor**。
+---
+
+## 14.5 判卷策略（Evaluation Strategy）
+
+### 1. 自动判卷（Automatic Ground Truth）
+适合由 `spatialforge.environment.relation` 与几何引擎严格判定的空间属性：
+- 方向方位（left / right / front / back）
+- 深度与欧式距离（depth / distance / relative distance）
+- 视锥可见性与半空间可见性（frustum visibility / front-halfspace）
+- 几何遮挡与包围盒重叠（occlusion / containment）
+- 物体身份判定与到达目标判定（identity / target reached）
+
+### 2. 人工判卷与辅助检视（Human Supervisor & Research Inspection）
+适合高层行为模式与模型因果可信度诊断：
+- 搜索与视点选择策略是否具有合理的信息增益；
+- 是否真正理解三维空间关系，而非单纯死记单视角 2D 纹理先验；
+- 识别“碰巧猜中”（如在南视角固定 bias 下的偶然正确）；
+- 评估多视点移动路线的冗余度与探索效率；
+- 检验模型内部表征是否形成稳定的三维一致性。
+
+> **核心原则**：最终评估架构采用 **权威几何自动真值（Automatic Ground Truth） + 人工科学监督（Human Supervisor）** 的双重闭环。
 
 ---
 
@@ -1965,18 +2122,33 @@ spatialforge explorer run
 
 ## God View Workbench
 
-建议最终优先级高于单纯 Gradio 指标面板。
+建议最终优先级高于单纯 Gradio 指标面板。作为下一阶段首要实施门控（详见 §14），其 UI 交互合约与显示规格规范如下：
 
-功能：
+核心功能：
+- real-time 3D scene（权威环境几何与世界真值漫游检视）
+- Agent first-person feed（Agent 当前所处视角的合法受限 RGB 观测）
+- trajectory（Agent 位姿与行动轨迹时间线）
+- camera frustum（相机主客体视锥体投影几何体）
+- selected next action（下一步候选视点/决策动作预测）
+- ground truth toggle（空间拓扑与关系真值图层显隐）
+- evaluation timeline（多步因果归因与判卷时间轴）
+- manual annotation / judgement（研究员人工诊断、判卷与空间幻觉标记）
 
-- real-time 3D scene
-- Agent first-person feed
-- trajectory
-- camera frustum
-- selected next action
-- ground truth toggle
-- evaluation timeline
-- manual annotation / judgement
+未来 UI 交互合约（Training Profile & Live Telemetry Contract）：
+- **训练/执行 Profile 选择器（Profile Selector）**：
+  - `reference`（MB1 × ACC8，精准复现/调试）
+  - `balanced`（MB2 × ACC4，显存裕量与吞吐均衡）
+  - `max_performance`（MB4 × ACC2，极致 GPU 算力利用，研发默认项）
+- **实时硬件与训练遥测看板（Live Telemetry Dashboard）**：
+  - GPU Utilization（实时与移动平均 GPU 利用率）
+  - VRAM Consumption（Torch Allocated / Torch Reserved / NVML 已用显存）
+  - Board Power Draw（实时功耗 W 与功耗墙占比）
+  - Processing Throughput（实时吞吐率 samples/s）
+  - Processed Samples Counter（当前已处理物理样本数 / 总样本数）
+  - Optimizer & Scheduler Progress（当前步数 / 总步数及进度百分比）
+  - Dynamic ETA（高精度剩余耗时预测）
+
+> **注**：此处规范为产品化交互合约与架构设计预留，**当前门控不直接编写前端 UI 实现代码**，确保设计意图与执行纪律无缝衔接。
 
 ## Experiment Dashboard
 
@@ -1992,39 +2164,46 @@ spatialforge explorer run
 
 # 27. 近期路线（执行顺序）
 
-> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1 / G2.0-E2 均已通过门控（G2.0-E2 见 §28 章节）。以下是当前执行顺序。
+> G2.0-A ~ G2.0-E3.3A（含 E3.1 / E3.2 / E3.3A）均已全通并通过门控（当前 HEAD: `f4a0089`，详见 §28 章节）。以下是当前最新的有序执行路线。
 
-## NEXT 1 — G2.0-E3 Formal Controlled Training & Transfer Evaluation
+## NEXT 1 — 3D God View / Research Inspector (God View Workbench, §14 / §26)
 
-> G2.0-E2 Controlled Training Harness & Pipeline Verification 已完成并通过门控（commit ada1179，见 §28 章节）。
-> G2.0-E3 尚未开始。
+> **当前首要实施门控（IMMEDIATE NEXT GATE）**。
 
-回答第一个 v2 科学问题：多视角 / 视角条件训练是否真正改善 orientation，并跨域迁移？
-对照：Baseline B (zero-shot) vs Control A (south) vs Treatment C (cardinal) vs Treatment D (cardinal+jitter)。
-评测：S1 / S2 合成泛化 + VSR Direct (`left_right`, `front_back`) + VSR Broad Orientation。
-执行顺序遵循经济原则：1. 加固评估器/解析器 -> 2. 冻结配置 -> 3. Baseline B -> 4. 单 seed=42 工程验证 -> 5. 审查指标/显存 -> 6. 扩展至 seeds 123/456。
+- **目标**：在 GPU 优化闭环后，优先构建交互式 3D 上帝视角科研检视工作台，打通权威环境几何真值、相机视锥体投影、第一人称受限观测、模型空间问答预测、几何自动判卷与实时遥测指标的全链路闭环。
+- **核心价值**：为后续正式多 Seed 科学矩阵及未来具身主动探索提供透明、直观的因果归因与误差分析基础设施，杜绝“黑盒训练”。
+- **科学边界**：God View 特权真值严禁泄露给 Agent 作为输入，严格隔离观测空间与世界真值。
 
-## NEXT 2 — v2.1 Embodied Explorer
+## NEXT 2 — G2.0-E3 Formal A/C/D Controlled Multi-Seed Matrix Execution
+
+> 依托冻结的 `max_performance` 执行 Profile，展开全量科学矩阵评测。
+
+- **科学问题**：回答 v2 核心课题——多视角 / 视角条件课程训练是否真正提升空间定向能力（orientation），并成功实现 cross-domain 跨域迁移？
+- **实验对照矩阵**：Baseline B (zero-shot) vs Control A (south) vs Treatment C (cardinal) vs Treatment D (cardinal+jitter)，全矩阵在统一的三组随机种子（seeds 42, 123, 456）下完成。
+- **执行规范**：严格固定单一执行 Profile（研发默认 `max_performance`），保障矩阵内绝对横向公平可比。
+- **评测协议**：S1 / S2 合成分布内与视点扰动泛化 + VSR Direct (`left_right`, `front_back`) + VSR Broad Orientation 真实图像跨域泛化。
+
+## NEXT 3 — v2.1 Embodied Explorer
 
 把 CameraPose 从系统指定转为 Agent action transition。
 
-## NEXT 3 — World Model Objective
+## NEXT 4 — World Model Objective
 
 动作条件 latent prediction。
 
-## NEXT 4 — v2.2 Active Observation
+## NEXT 5 — v2.2 Active Observation
 
 信息增益驱动的下一步观察。
 
-## NEXT 5 — v2.3 Interactive Object Search
+## NEXT 6 — v2.3 Interactive Object Search
 
 真正实现“找东西 + 遮挡 + 容器交互”。
 
 ---
 
-# 28. 当前暂停点（2026-09-07）
+# 28. 当前暂停点（2026-09-08）
 
-今天工作在 **G2.0-E2 门控完成（commit ada1179）** 处暂停。
+今天工作在 **GPU TRAINING OPTIMIZATION COMPLETE（G2.0-E3.3A 门控闭环，Commit f4a0089）** 处暂停。
 
 正式状态：
 
@@ -2033,7 +2212,7 @@ Branch:
 feat/g2.0-d-qa-curriculum
 
 Latest implementation commit:
-ada1179 feat(g2.0-e2): add controlled training harness
+f4a0089 perf(g2.0-e3.3a5): add GPU training performance profiles
 
 G2.0-A: PASS
 G2.0-B: PASS
@@ -2042,6 +2221,9 @@ G2.0-C: PASS
 G2.0-D: PASS
 G2.0-E1: PASS / CLOSED
 G2.0-E2: PASS / CLOSED
+G2.0-E3.1: PASS / CLOSED
+G2.0-E3.2: PASS / CLOSED
+G2.0-E3.3A: PASS / CLOSED
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -2116,8 +2298,36 @@ Verified after G2.0-E2:
 - F1 blocker fixed: eliminated 96 visual LoRA modules via explicit LM allowlist
 - F2 blocker fixed: implemented formal gradient accumulation loop, linear scheduler, and enabled gradient checkpointing
 
+Verified after G2.0-E3.1:
+- total CPU unittest suite: 201 tests passed (188 pre-existing + 13 new evaluation & protocol tests)
+- strict word-boundary directional / yes-no answer parser implemented (zero substring false positives)
+- immutable experiment protocol constants and SHA-256 dataset hash integrity guards implemented
+- 10 preflight integrity checks enforced prior to execution (dataset, model revision, split isolation, LoRA target allowlist, frozen run config)
+- commits: c494e26, 6553d17
+
+Verified after G2.0-E3.2:
+- total CPU unittest suite: 227 tests passed (201 pre-existing + 26 new experiment harness tests)
+- end-to-end controlled engineering experiment runner implemented (scripts/run_engineering_experiment.py)
+- 4 run configurations pre-frozen immutably with SHA-256 hashes (Baseline B, Control A42, Treatment C42, Treatment D42)
+- Baseline B zero-shot evaluation pipeline verified end-to-end
+- deterministic sample alignment & causal delta computation verified
+- commit: af77949
+
+Verified after G2.0-E3.3A:
+- total CPU unittest suite: 241 tests passed (227 pre-existing + 14 new profiling & telemetry tests)
+- Frozen Vision Feature Cache implemented (eliminates redundant vision tower forward passes)
+- gradient checkpointing disabled for performance execution profiles
+- mathematically controlled cached-vision batching with right padding (per-example loss mathematically equivalent to single-sample reference)
+- 3 first-class execution profiles productized (reference, balanced, max_performance)
+- real-time background NVML/PyTorch telemetry sampler implemented (GPU util, VRAM, power, SM clocks)
+- sample-based training progress accounting (1552 physical samples)
+- profile capability preflight and No-Silent-Fallback policy enforced
+- P7 full soak verified on RTX 4080 SUPER: 1552/1552 samples, 194/194 optimizer steps, 182.2s (3.04 min), 8.519 sps, 9.18x speedup vs historical reference (27.88 min), 96.2% avg GPU util (100% p99), 241.1 W avg power, ~2767 MHz avg SM clock
+- PyTorch caching-allocator reserved capacity plateaued stably (~23.1 GB); host RSS drift 0.39 MB; zero memory leaks; zero OOM
+- commit: f4a0089
+
 NEXT IMPLEMENTATION:
-G2.0-E3 Formal Controlled Training & Transfer Evaluation (NOT started)
+3D God View / Research Inspector (God View Workbench, §14 / §26)
 ```
 
 环境说明：
@@ -2125,19 +2335,26 @@ G2.0-E3 Formal Controlled Training & Transfer Evaluation (NOT started)
 - AMD Radeon Developer Cloud 已从当前开发工作流停用（其 One-click 池无法满足最低 GPU 资源请求）
 - 当前开发 / 计算环境为 AutoDL 实例（远程 Linux / CUDA）
 - OpenCode CLI 直接运行在 AutoDL 实例上；本地机器为控制 / 协调端
-- AutoDL 当前承担 CPU / code 工作；计划用于 CUDA / GPU workloads
+- AutoDL 搭载 NVIDIA GeForce RTX 4080 SUPER (vGPU exposure, 32,760 MiB 可见显存, 320 W 标称功耗上限)
+- P7 全量 1552 样本浸泡压测已在此环境完全验证并达成 9.18x 加速（3.04 min, 8.519 sps, 96.2% avg GPU util）；不宣称其他 32 GB 硬件展现完全一致的吞吐
 - Blender 4.2.0 已在 AutoDL 实例就绪并完成 G2.0-E1 800 张图像渲染
 - GitHub 仍为长期真源；用户保留 commit / push 最终决策
 
+研发能效策略（Efficiency Policy）：
+
+- SpatialForge 研发与实验默认采用 `max_performance` Profile，以缩短研究迭代延迟、节省计算开销
+- 质量门控与严谨科学因果对照标准保持不变
+- 性能优化绝不可单纯为了追求硬件利用率指标而修改科学语义
+
 当前不要做：
 
-- 不要重做 v1
-- 不要重写 G2.0-A / B / B.1 / C / D / E1 / E2
-- 不要把 4 fixed cameras 当最终训练方案
-- 不要直接引入复杂 Agent before camera/truth/curriculum layers are stable
-- 不要把 God View 暴露给 Agent
-- 不要声称 G2.0-E3 已经开始
-- 不要跳过单 seed=42 验证直接启动全量 A/C/D 多 seed 训练
+- 不要跳过下一阶段 3D God View / Research Inspector 基建直接启动大规模 multi-seed 矩阵执行
+- 不要将 God View 特权真值暴露给 Agent 作为输入通道
+- 不要静默降级 Training Profile（严格遵守 No-Silent-Fallback，由用户明确裁决）
+- 不要在正式因果矩阵中混用不同 Profile（必须在整个 A/C/D 矩阵中严格统一固定使用单个 Profile）
+- 不要重做已关闭门控（G2.0-A ~ G2.0-E3.3A）
+- 不要把 4 fixed cameras 当最终具身方案
+- 不要直接引入复杂 Agent before camera/truth/curriculum/inspection layers are stable
 - 不要修改历史 v1 优化语义（如擅自添加 cosine scheduler 或 warmup）
 - 不要将 S2 宣传为连续球面上强 OOD 视点泛化
 - 不要将 front-halfspace 等同于像素级可见/无遮挡
