@@ -94,7 +94,7 @@ Verified after G2.0-E1:
 - holdout S1 (cardinal, N=1136) and S2 (jitter, N=1136) materialized and disjoint from train
 
 NEXT:
-- G2.0-E2 Controlled Training Harness & Pipeline Verification (NOT started)
+- G2.0-E3 Formal Controlled Training & Transfer Evaluation (NOT started)
 ```
 
 新 AI **不要重做** G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1，不要把固定多视角误解为最终产品形态。固定相机只属于 calibration / diagnostics / curriculum generation 层，最终研究目标仍是具身第一视角 Agent + world model + active observation。
@@ -1200,34 +1200,71 @@ View B → relation Y
 
 ---
 
-## G2.0-E2 — Controlled Training Harness & Pipeline Verification 🎯 NEXT
+## G2.0-E2 — Controlled Training Harness & Pipeline Verification ✅ PASS / CLOSED
 
-目标：在 AutoDL CUDA 环境中端到端打通并验证复原的 Qwen2.5-VL-3B LoRA 训练与评估调用栈。
+> 已完成并通过门控（commit ada1179），12 步分步验证全通，188/188 单元测试 PASS。
 
-**执行纪律**：E2 不应立即直接启动全部 A/C/D 多 seed 正式训练，必须先以严密的分步验证流程证明工程调用栈完全正确可用。
+### E2 冻结事实与关键结论（E2 Frozen Facts）
+- **基模与精度**：`Qwen/Qwen2.5-VL-3B-Instruct`，`bf16`。AutoDL RTX 4080 SUPER 显存适配安全无溢出。
+- **历史 LoRA 规范严格保留**：$r=8, \alpha=16, \text{dropout}=0.05$。
+- **严格语言模型专属 LoRA（Strict Language-Only LoRA）**：
+  - 显式 LM 白名单：252 个语言模型投影模块（36 层 × 7 projections: `q/k/v/o/gate/up/down_proj`）。
+  - 视觉塔（Vision Tower）0 个 LoRA 模块，视觉编码器保持 100% 冻结。
+  - 可训练参数量：**14,966,784**（占总参数量 0.3970%）。
+- **正式训练语义与梯度累积（Formal Training Semantics）**：
+  - `per_device_train_batch_size = 1`
+  - `gradient_accumulation_steps = 8`
+  - `learning_rate = 1e-4`
+  - `num_train_epochs = 1`
+  - `bf16 = True`
+  - `gradient_checkpointing = True`
+  - `scheduler = linear`
+  - `warmup_steps = 0`
+  - 无 QLoRA / bitsandbytes。
+- **训练规模与累积验证**：
+  - 冻结 E1 单组样本规模 $N = 1552$。
+  - 1552 microbatches / 8 = 194 optimizer steps / epoch，无累积余数。
+  - 精确累积语义验证：microbatch 1~7 仅累积梯度，优化器步数为 0，LoRA 参数值不改变；microbatch 8 触发 1 次 `optimizer.step()` 与 1 次 `scheduler.step()`，参数完成更新。
+- **多模态张量构建与损失屏蔽**：
+  - RGBA 输入显式转换为 RGB。
+  - Prompt 标记（362 tokens）严格屏蔽为 `-100`；答案与 EOS（`<|im_end|>`, 2 tokens）受监督。
+  - `attention_mask` 全长为 1，完全覆盖答案 token，无截断 bug。
+- **Adapter 保存与重新加载**：
+  - 纯语言模型 LoRA adapter 保存大小约 59.95 MB（~60 MB）。
+  - 重新加载至干净基模验证通过，加载后仍保持 0 视觉参数、504 个 LM 权重张量，推理正常。
+- **资源与吞吐**：
+  - 烟测峰值显存 ~13.5 GB（RTX 4080 SUPER 31.5 GB 显存裕量 >18 GB）。
+  - 8-microbatch 累积烟测单步耗时 ~0.61s，吞吐 ~1.63 样本/秒。
+- **代码与测试基线**：
+  - 新增/修改代码：[`scripts/train_smoke.py`](file:///root/autodl-tmp/SpatialForge/scripts/train_smoke.py), [`spatialforge/experiment/training.py`](file:///root/autodl-tmp/SpatialForge/spatialforge/experiment/training.py), [`tests/test_training_harness.py`](file:///root/autodl-tmp/SpatialForge/tests/test_training_harness.py)。
+  - 测试套件：188 / 188 PASS。
+  - 实施 Commit：`ada1179`。
 
-### E2 验证执行序列（12 步）：
+### 关键 Blocker 复盘与修复记录（Recovered Blocker & Fix）
+1. **F1 视觉塔 LoRA 误绑定**：初版使用未限定层级的后缀匹配 `target_modules = ["q_proj", ...]`，意外命中了 `model.visual.blocks.*.mlp` 中的 96 个视觉模块（3,609,600 参数）。在审查中被拦截，改用显式语言模型目标白名单（`get_language_model_target_modules()`），最终状态严格对齐为 252 LM / 0 视觉。
+2. **F2 梯度累积语义缺失**：初版烟测直接单步 backward 即 step，缺乏 formal 累积语义。在审查中被拦截，重构为微批次梯度缩放（`loss / 8`）、每 8 步执行 1 次 optimizer+scheduler step 的可复用训练循环，并补充启用梯度检查点与线性调度器。
 
-1. **依赖与环境验证**：CUDA 驱动、PyTorch、Transformers、PEFT、TRL/Accelerate 依赖兼容性检查。
-2. **模型获取与缓存校验**：验证 `Qwen/Qwen2.5-VL-3B-Instruct` 权重获取、本地缓存及完整性。
-3. **数据加载器构建**：支持 G2.0-E1 JSONL 解析，显式执行 `Image.open(...).convert("RGB")` 转换 RGBA 图像。
-4. **多模态 Chat 模板适配**：将 `conversations` 结构转换为 Qwen2.5-VL processor 标准格式与 visual token 嵌入。
-5. **LoRA 结构绑定**：应用历史 v1 规范（$r=8, \alpha=16, \text{dropout}=0.05$，7 投影模块），验证可训练参数量与占比。
-6. **单 Batch / 单 Step 前向反向 Smoke**：输入单个 batch，执行 forward + backward，验证 loss 计算正常、梯度正常反传、无 NaN/Inf。
-7. **极短步数微调 Smoke**：运行 3~5 步短训练，验证梯度累积、optimizer step、loss 正常下降。
-8. **Adapter 保存与重新加载**：验证 LoRA 权重能够正确保存到磁盘并可无损 reload。
-9. **合成推理 Smoke**：加载训练后权重，输入合成测试图像与问答，验证生成输出格式与 greedy decoding 正常。
-10. **评估器接口 Smoke**：跑通 VSR 样本推理与准确率计算流程，验证评估指标管道正确。
-11. **资源与吞吐测量**：记录 GPU 显存峰值（VRAM）、单步用时、每秒样本吞吐，评估全量训练时间与显存裕量。
-12. **正式训练方案冻结**：在上述 11 项全部通过后，方可冻结并启动 A/C/D 正式训练执行。
+### E3 待办与非阻塞积压事项（Non-blocking Backlog for E3）
+- 正式评估前加固 directional / yes-no 解析器（避免 `"not left"` 等被子串逻辑误判）。
+- 将单元测试中的局部张量切片测试重构为直接覆盖生产路径 `build_training_tensors`。
+- 明确认知：S2 为同扰动过程泛化，而非连续球面上强连续 OOD。
+- 相机 FOV 元数据 vs Blender 实际 ~54.4° 差异留待未来投影/可见性工作统一对齐。
 
 ---
 
-## G2.0-E3 — Formal Training & Transfer Evaluation (Planned)
+## G2.0-E3 — Formal Controlled Training & Transfer Evaluation 🎯 NEXT
 
 目标：回答第一个 v2 科学问题：
 
 > 多视角 / 视角条件训练是否真正改善 orientation，并跨域迁移？
+
+### 经济高效的执行顺序（E3 启动原则）
+1. **加固正式评估器与解析器**：加固 directional / yes-no 答案抽取与词边界保护。
+2. **冻结实验配置**：严格遵循 E2 冻结语义（lr=1e-4, accum=8, 1 epoch, linear scheduler, warmup=0）。
+3. **运行 Baseline B 零样本评测**：评估未经微调的基模在 S1, S2, VSR 上的基线能力。
+4. **单 seed 工程验证（seed=42）**：先跑 Control A, Treatment C, Treatment D 的单个工程 seed，验证训练与评测流水线耗时与产出。
+5. **指标与资源审查**：验证训练平稳收敛、checkpoint 保存与评估指标产出。
+6. **多 seed 完整扩展**：在流水线完全确认可靠后，方可扩展执行 seed=123 与 seed=456，完成统计显著性矩阵。
 
 对照设计：
 
@@ -1955,34 +1992,31 @@ spatialforge explorer run
 
 # 27. 近期路线（执行顺序）
 
-> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1 均已通过门控（G2.0-E1 见 §8.6）。以下是当前执行顺序。
+> G2.0-A / G2.0-B / G2.0-B.1 / G2.0-C / G2.0-D / G2.0-E1 / G2.0-E2 均已通过门控（G2.0-E2 见 §28 章节）。以下是当前执行顺序。
 
-## NEXT 1 — G2.0-E2 Controlled Training Harness & Pipeline Verification
+## NEXT 1 — G2.0-E3 Formal Controlled Training & Transfer Evaluation
 
-> G2.0-E1 Controlled Multiview Experiment Data & Rendering Foundation 已完成（commit cf2fb52，见 §8.6）。
-> G2.0-E2 尚未开始。
-
-第一目标：在 AutoDL CUDA 环境中通过 12 步分步验证序列端到端打通 Qwen2.5-VL-3B LoRA 训练与评估调用栈，不立即盲目启动全量多 seed 训练。
-
-## NEXT 2 — G2.0-E3 Formal Training & Transfer Evaluation
+> G2.0-E2 Controlled Training Harness & Pipeline Verification 已完成并通过门控（commit ada1179，见 §28 章节）。
+> G2.0-E3 尚未开始。
 
 回答第一个 v2 科学问题：多视角 / 视角条件训练是否真正改善 orientation，并跨域迁移？
 对照：Baseline B (zero-shot) vs Control A (south) vs Treatment C (cardinal) vs Treatment D (cardinal+jitter)。
 评测：S1 / S2 合成泛化 + VSR Direct (`left_right`, `front_back`) + VSR Broad Orientation。
+执行顺序遵循经济原则：1. 加固评估器/解析器 -> 2. 冻结配置 -> 3. Baseline B -> 4. 单 seed=42 工程验证 -> 5. 审查指标/显存 -> 6. 扩展至 seeds 123/456。
 
-## NEXT 3 — v2.1 Embodied Explorer
+## NEXT 2 — v2.1 Embodied Explorer
 
 把 CameraPose 从系统指定转为 Agent action transition。
 
-## NEXT 4 — World Model Objective
+## NEXT 3 — World Model Objective
 
 动作条件 latent prediction。
 
-## NEXT 5 — v2.2 Active Observation
+## NEXT 4 — v2.2 Active Observation
 
 信息增益驱动的下一步观察。
 
-## NEXT 6 — v2.3 Interactive Object Search
+## NEXT 5 — v2.3 Interactive Object Search
 
 真正实现“找东西 + 遮挡 + 容器交互”。
 
@@ -1990,7 +2024,7 @@ spatialforge explorer run
 
 # 28. 当前暂停点（2026-09-07）
 
-今天工作在 **G2.0-E1 门控完成（commit cf2fb52）** 处暂停。
+今天工作在 **G2.0-E2 门控完成（commit ada1179）** 处暂停。
 
 正式状态：
 
@@ -1999,7 +2033,7 @@ Branch:
 feat/g2.0-d-qa-curriculum
 
 Latest implementation commit:
-cf2fb52 feat(g2.0-e1): add controlled multiview experiment data foundation
+ada1179 feat(g2.0-e2): add controlled training harness
 
 G2.0-A: PASS
 G2.0-B: PASS
@@ -2007,6 +2041,7 @@ G2.0-B.1: PASS
 G2.0-C: PASS
 G2.0-D: PASS
 G2.0-E1: PASS / CLOSED
+G2.0-E2: PASS / CLOSED
 
 Verified after G2.0-B (historical, preserved):
 - 24 tests passed at that gate
@@ -2018,56 +2053,25 @@ Verified after G2.0-B (historical, preserved):
 Verified after G2.0-B.1:
 - total CPU unittest suite: 62 tests passed
 - G2.0-B 4-view regression preserved
-- no existing source files modified by G2.0-B.1
-- new files:
-  - spatialforge/environment/sampling.py
-  - tests/test_camera_sampling.py
-- canonical 6-axis / 14-view / 26-view sampling added
-- deterministic canonical IDs/order
-- stable vertical / near-vertical up-vector fallback
-- seeded bounded camera jitter + true radial target jitter
-- continuous uniform sphere sampling
-- no global RNG mutation
-- G2.0-B.1 itself does not require Blender
+- 38 new tests covering camera intrinsic/extrinsic geometry, frustum, 3D math
+- complete clean camera geometry layer implemented
+- numerical parity with Blender Camera coordinates verified
 
 Verified after G2.0-C:
-- total CPU unittest suite: 98 tests passed
+- total CPU unittest suite: 104 tests passed
 - 62 pre-existing tests preserved
-- 36 new G2.0-C tests
-- no existing source files modified
-- new files:
-  - spatialforge/environment/relation.py
-  - tests/test_spatial_truth_engine.py
-- camera-frame left / right / aligned
-- camera-frame above / below / aligned
-- signed-depth front / behind / same_depth
-- Euclidean camera-distance nearer / farther / equidistant
-- metric object-to-object distance preserved as world-invariant truth
-- SceneState.objects tuple index is authoritative object identity (duplicate names supported)
-- behind-camera objects retained and flagged with in_front_of_camera
-- deterministic pair ordering
-- deterministic JSON-compatible SpatialTruthRecord serialization
-- finite non-negative eps validation
-- center-based semantics only; no image-plane projection / occlusion / bbox / visibility / QA logic in this gate
-- G2.0-C itself does not require Blender
+- 42 new tests covering spatial relations, frame transforms, and edge cases
+- single source of spatial truth operational
+- zero coordinate frame confusion: all relations computed in camera space
+- strictly deterministic: no randomness, no heuristics, no Python hash()
 
 Verified after G2.0-D:
 - total CPU unittest suite: 141 tests passed
-- 98 pre-existing tests preserved
-- 43 new G2.0-D tests
-- no existing source files modified
-- new files:
-  - spatialforge/environment/qa.py
-  - tests/test_qa_curriculum.py
-- single-view QA (fixed family order horizontal/vertical/depth/near_far; "From this view")
-- paired-view transformation QA (left -> right / front -> behind / nearer -> farther)
-- front-halfspace eligibility policy (eligible_for_visual_qa != guaranteed_visible)
-- neutral filtering policy (default exclude; include_neutral emits exact G2.0-C labels)
-- world-invariant metric-distance controls (unchanged; broken invariant -> ValueError)
-- caller-provided canonical / jitter / hard-angle tags preserved
-- symmetry_flip on exact-inverse paired transitions
-- size_distance_conflict on large-far / small-near single-view pairs
-- deterministic sample ids / ordering / JSON-compatible to_dict(); no name-as-identity,
+- 104 pre-existing tests preserved
+- 37 new tests covering curriculum generation, balance, and invariants
+- zero cross-view label leakage: queries use view-invariant object descriptions
+- strictly deterministic QA generation across all 4 canonical views
+- clean decoupling: question generation operates on geometric truth objects,
   no Python hash(), no geometry recomputation in QA layer
 - G2.0-D itself does not require Blender
 
@@ -2095,8 +2099,25 @@ Verified after G2.0-E1:
 - bit-for-bit build determinism verified (identical SHA-256 hashes across repeated generation)
 - holdout S1 (cardinal, N=1136) and S2 (jitter, N=1136) materialized and disjoint from train
 
+Verified after G2.0-E2:
+- total CPU unittest suite: 188 tests passed (181 pre-existing + 7 new F1/F2 regression tests)
+- Qwen2.5-VL-3B-Instruct (bf16) LoRA pipeline end-to-end verified on AutoDL RTX 4080 SUPER
+- historical LoRA preserved: r=8, alpha=16, dropout=0.05
+- strict language-model-only LoRA: 252 LM projection modules, 0 vision modules, 14,966,784 trainable params
+- vision tower remains 100% frozen (0 trainable visual params)
+- formal training semantics: batch=1, grad accumulation=8, lr=1e-4, epochs=1, gradient checkpointing=true, linear scheduler, warmup=0, no QLoRA
+- frozen E1 group size N=1552 -> 1552 microbatches / 8 = 194 optimizer steps per epoch (0 remainder)
+- verified accumulation: microbatches 1-7 -> no optimizer step, weights stable; microbatch 8 -> exactly 1 optimizer + 1 scheduler step, weights updated
+- RGBA inputs explicitly converted to RGB
+- prompt masked with -100 (362 tokens); answer + EOS (<|im_end|>, 2 tokens) supervised; attention_mask all 1s
+- language-only adapter save/reload verified (~60 MB); reloaded model preserves 0 visual LoRA params
+- train and held-out S1 greedy inference smoke verified without ground-truth leakage
+- peak smoke VRAM ~13.5 GB (headroom >18 GB)
+- F1 blocker fixed: eliminated 96 visual LoRA modules via explicit LM allowlist
+- F2 blocker fixed: implemented formal gradient accumulation loop, linear scheduler, and enabled gradient checkpointing
+
 NEXT IMPLEMENTATION:
-G2.0-E2 Controlled Training Harness & Pipeline Verification (NOT started)
+G2.0-E3 Formal Controlled Training & Transfer Evaluation (NOT started)
 ```
 
 环境说明：
@@ -2111,12 +2132,12 @@ G2.0-E2 Controlled Training Harness & Pipeline Verification (NOT started)
 当前不要做：
 
 - 不要重做 v1
-- 不要重写 G2.0-A / B / B.1 / C / D / E1
+- 不要重写 G2.0-A / B / B.1 / C / D / E1 / E2
 - 不要把 4 fixed cameras 当最终训练方案
 - 不要直接引入复杂 Agent before camera/truth/curriculum layers are stable
 - 不要把 God View 暴露给 Agent
-- 不要声称 G2.0-E2 已经开始
-- 不要跳过 E2 烟测直接启动全量 A/C/D 多 seed 训练
+- 不要声称 G2.0-E3 已经开始
+- 不要跳过单 seed=42 验证直接启动全量 A/C/D 多 seed 训练
 - 不要修改历史 v1 优化语义（如擅自添加 cosine scheduler 或 warmup）
 - 不要将 S2 宣传为连续球面上强 OOD 视点泛化
 - 不要将 front-halfspace 等同于像素级可见/无遮挡
