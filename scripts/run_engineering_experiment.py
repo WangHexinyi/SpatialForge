@@ -524,6 +524,7 @@ def train_and_eval_group(
         output_dir=run_dir,
         config=train_cfg,
         seed=seed,
+        group=group,
     )
     t_train = time.time() - t_train_0
 
