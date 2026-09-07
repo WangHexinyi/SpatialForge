@@ -124,66 +124,16 @@ def compute_formal_optimizer_steps(
     """Calculate exact optimizer steps for formal training (e.g. 1552 * 1 / 8 = 194)."""
     return (num_samples * epochs) // gradient_accumulation_steps
 
-
-# Supported directional answer vocabulary for G2.0-E
-DIRECTIONAL_VOCABULARY = (
-    "left",
-    "right",
-    "above",
-    "below",
-    "front",
-    "behind",
-    "nearer",
-    "farther",
+from spatialforge.experiment.evaluation import (
+    DIRECTIONAL_VOCABULARY,
+    VSR_ALL_DIMS,
+    VSR_BROADER_DIMS,
+    VSR_DIRECT_DIMS,
+    VSR_RELATION_TO_DIM,
+    classify_vsr_relation,
+    parse_directional_answer,
+    parse_yesno_answer,
 )
-
-# VSR external evaluation taxonomy: Direct relation transfer vs broader orientation
-VSR_DIRECT_DIMS = frozenset({"left_right", "front_back"})
-VSR_BROADER_DIMS = frozenset({"orientation"})
-
-VSR_RELATION_TO_DIM: Dict[str, str] = {
-    # Direct horizontal
-    "left of": "left_right",
-    "right of": "left_right",
-    "at the left side of": "left_right",
-    "at the right side of": "left_right",
-    "at the side of": "left_right",
-    # Direct depth
-    "in front of": "front_back",
-    "behind": "front_back",
-    "ahead of": "front_back",
-    "at the back of": "front_back",
-    # Vertical
-    "above": "vertical",
-    "below": "vertical",
-    "on top of": "vertical",
-    "under": "vertical",
-    "beneath": "vertical",
-    "over": "vertical",
-    "down from": "vertical",
-    # Near / Far
-    "near": "near_far",
-    "close to": "near_far",
-    "next to": "near_far",
-    "beside": "near_far",
-    "adjacent to": "near_far",
-    "alongside": "near_far",
-    "by": "near_far",
-    "far away from": "near_far",
-    "far from": "near_far",
-    "away from": "near_far",
-    "beyond": "near_far",
-    # Broader historical orientation (NOT direct left/right/front/back)
-    "facing": "orientation",
-    "facing away from": "orientation",
-    "toward": "orientation",
-    "opposite to": "orientation",
-    "parallel to": "orientation",
-    "perpendicular to": "orientation",
-    "across from": "orientation",
-    "across": "orientation",
-    "along": "orientation",
-}
 
 
 @dataclass(frozen=True)
@@ -402,50 +352,6 @@ class MultimodalSampleDataset:
         return build_training_tensors(self.processor, img, rec.question, rec.answer)
 
 
-def parse_directional_answer(text: str) -> Optional[str]:
-    """Parse model text generation into one of the 8 canonical directional answers."""
-    cleaned = text.strip().lower()
-    # Strip trailing punctuation
-    for ch in [".", ",", "!", "?", "\n", '"', "'"]:
-        cleaned = cleaned.rstrip(ch).strip()
-
-    # Exact token match
-    tokens = cleaned.split()
-    if not tokens:
-        return None
-
-    first_word = tokens[0]
-    for target in DIRECTIONAL_VOCABULARY:
-        if first_word == target:
-            return target
-
-    # Fallback to substring if unambiguous
-    matches = [v for v in DIRECTIONAL_VOCABULARY if v in cleaned]
-    if len(matches) == 1:
-        return matches[0]
-
-    return None
-
-
-def parse_yesno_answer(text: str) -> Optional[str]:
-    """Parse model text generation for VSR evaluation (yes/no)."""
-    t = text.strip().lower()
-    if t.startswith("yes"):
-        return "yes"
-    if t.startswith("no"):
-        return "no"
-    if "yes" in t and "no" not in t:
-        return "yes"
-    if "no" in t and "yes" not in t:
-        return "no"
-    return None
-
-
-def classify_vsr_relation(relation: str) -> str:
-    """Classify a VSR relation into dimension; distinguishes direct vs broader orientation."""
-    rel = relation.strip().lower()
-    return VSR_RELATION_TO_DIM.get(rel, "other")
-
 
 def run_single_forward_step(
     model: Any,
@@ -551,10 +457,13 @@ def run_formal_training_loop(
     config: Optional[FormalTrainingConfig] = None,
     max_microbatches: Optional[int] = None,
     device: str = "cuda",
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Reusable formal training loop with exact gradient accumulation semantics.
 
     Semantics:
+    - Test-set leakage guard: validates records do not contain holdout scenes.
+    - Seed policy: seeds PRNGs if seed is provided.
     - optimizer.zero_grad()
     - For each microbatch:
         raw_loss = forward()
@@ -567,6 +476,11 @@ def run_formal_training_loop(
     """
     import torch
     from transformers import get_linear_schedule_with_warmup
+    from spatialforge.experiment.protocol import seed_everything, validate_training_scenes
+
+    validate_training_scenes(records)
+    if seed is not None:
+        seed_everything(seed)
 
     if config is None:
         config = FormalTrainingConfig()
