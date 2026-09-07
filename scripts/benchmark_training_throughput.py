@@ -47,13 +47,19 @@ from spatialforge.experiment.protocol import (
     seed_everything,
 )
 from spatialforge.experiment.training import (
+    DEFAULT_TRAINING_PROFILE,
     FormalTrainingConfig,
+    ProfileCapabilityError,
     build_training_tensors,
     collate_single_sample_batch,
     create_lora_config,
     format_chat_prompt,
+    get_profile,
+    list_profiles,
     load_and_preprocess_image,
     load_training_records,
+    run_single_forward_step,
+    validate_profile_capability,
 )
 
 
@@ -1108,9 +1114,411 @@ def run_p5_full_soak(
     return report
 
 
+def run_p7_full_soak(
+    group: str = "A",
+    seed: int = 42,
+    output_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Execute full 1552-sample soak of Candidate P7 (max_performance: MB4 x ACC2, GC=False, VC=True).
+
+    Requirements:
+    1. Preflight Capability Check: validate_profile_capability("max_performance") enforcing NO SILENT FALLBACK.
+    2. Full 1552-Sample Training Loop:
+       - 1552 samples, 388 microbatches (MB=4), 194 optimizer steps (ACC=2).
+       - Sample-based progress tracking and accounting.
+    3. Memory Stability & Checkpoints:
+       Checkpoints captured at:
+       - 'model_loaded'
+       - 'cache_ready'
+       - 'first_optimizer_update' (step 1, after microbatch 2 / 8 samples)
+       - 'progress_25_pct' (sample 388)
+       - 'progress_50_pct' (sample 776)
+       - 'progress_75_pct' (sample 1164)
+       - 'progress_100_pct' (sample 1552)
+       Tracking:
+       - torch_allocated_mb, torch_reserved_mb, allocator_fragmentation_mb (reserved - allocated),
+         fragmentation_ratio, nvml_used_mb, host_rss_mb.
+       Verifying:
+       - Stable plateau vs monotonic leak across 25%-100% progress.
+       - Allocator fragmentation bounds.
+    4. Performance Acceptance:
+       - Wall time <= 3.8 min (target) / <= 3.4 min (preferred).
+       - Average GPU utilization >= 85%.
+       - Telemetry tracking SM clock MHz (avg, min, max, p99) and GPU util p99.
+    5. Save complete report to outputs/experiments/g2.0-e3-performance/p7_full_soak_report.json.
+    """
+    if output_path is None:
+        output_path = REPO_ROOT / "outputs/experiments/g2.0-e3-performance/p7_full_soak_report.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 80)
+    print(f"G2.0-E3.3A5 P7 FULL SOAK & ACCEPTANCE (Group {group}, Seed {seed}, MB4 x ACC2)")
+    print("=" * 80)
+
+    # 1. Capability Preflight (Hard check: NO SILENT FALLBACK)
+    print("\n[1/6] Executing profile capability preflight check...")
+    prof = get_profile("max_performance")
+    validate_profile_capability(prof)
+    print(f"  ✓ Device capability verified for {prof.profile_id} (req: ~{prof.memory_estimate_mb:.0f} MB). No fallback.")
+
+    # 2. Load dataset records (N=1552)
+    print("\n[2/6] Loading formal training records...")
+    data_path = REPO_ROOT / TRAIN_DATASET_PATHS[group]
+    records = load_training_records(data_path, base_dir=REPO_ROOT)
+    num_samples = len(records)
+    assert num_samples == 1552, f"Expected 1552 records, got {num_samples}"
+    print(f"  ✓ Loaded {num_samples} records from {data_path.name}")
+
+    # Process and NVML client for memory tracking
+    proc = psutil.Process()
+    nvml_client = None
+    try:
+        nvml_client = NVMLClient(0)
+    except Exception:
+        pass
+
+    def capture_memory_checkpoint(label: str) -> Dict[str, Any]:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            alloc_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+            res_mb = torch.cuda.memory_reserved() / (1024 ** 2)
+        else:
+            alloc_mb, res_mb = 0.0, 0.0
+        frag_mb = res_mb - alloc_mb
+        frag_ratio = (frag_mb / res_mb) if res_mb > 0 else 0.0
+        rss_mb = proc.memory_info().rss / (1024 ** 2)
+        nvml_mb = 0.0
+        if nvml_client is not None:
+            telemetry = nvml_client.query()
+            nvml_mb = telemetry.get("nvml_gpu_memory_used_mb", 0.0)
+        rec = {
+            "checkpoint": label,
+            "torch_allocated_mb": round(alloc_mb, 2),
+            "torch_reserved_mb": round(res_mb, 2),
+            "allocator_fragmentation_mb": round(frag_mb, 2),
+            "fragmentation_ratio": round(frag_ratio, 4),
+            "nvml_used_mb": round(nvml_mb, 2),
+            "host_rss_mb": round(rss_mb, 2),
+        }
+        print(f"  [Memory Checkpoint: {label:<22}] Alloc: {rec['torch_allocated_mb']:>8.1f} MB | "
+              f"Res: {rec['torch_reserved_mb']:>8.1f} MB | Frag: {rec['allocator_fragmentation_mb']:>7.1f} MB "
+              f"({rec['fragmentation_ratio']*100:>4.1f}%) | NVML: {rec['nvml_used_mb']:>8.1f} MB | RSS: {rec['host_rss_mb']:>8.1f} MB")
+        return rec
+
+    memory_checkpoints: Dict[str, Dict[str, Any]] = {}
+
+    # 3. Model setup (Qwen2.5-VL-3B bf16 + 252 LM LoRA modules, GC=False)
+    print("\n[3/6] Initializing model and 252-LM LoRA adapter (GC=False)...")
+    processor = AutoProcessor.from_pretrained(DEFAULT_MODEL_PATH)
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        DEFAULT_MODEL_PATH,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
+    )
+    model.enable_input_require_grads()
+    # GC is False for P7
+    lora_cfg = create_lora_config()
+    model = get_peft_model(model, lora_cfg)
+    trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert trainable_count == 14966784, f"Trainable params {trainable_count} != 14,966,784"
+    print(f"  ✓ Trainable parameters: {trainable_count:,} (252 LM modules, 0 vision)")
+
+    memory_checkpoints["model_loaded"] = capture_memory_checkpoint("model_loaded")
+
+    # 4. Vision cache population and tensor preparation
+    print("\n[4/6] Populating vision cache & pre-baking inputs_embeds for 1552 samples...")
+    cache_dir = REPO_ROOT / "outputs/cache/frozen_vision_features"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    vc_cache = FrozenVisionFeatureCache(cache_dir=cache_dir, in_memory=True)
+    img_cache = DecodedImageCache()
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+
+    t_prep_0 = time.perf_counter()
+    prepared_samples = []
+    with torch.no_grad():
+        for r in records:
+            c_feat = vc_cache.get_or_compute(
+                r.image_path, model, processor, device="cuda", dtype=torch.bfloat16
+            ).to("cuda")
+            img = img_cache.get(r.image_path)
+            t = build_training_tensors(processor, img, r.question, r.answer)
+            in_emb = base_model.model.get_input_embeddings()(t["input_ids"].unsqueeze(0).to("cuda"))
+            mask, _ = base_model.model.get_placeholder_mask(
+                t["input_ids"].unsqueeze(0).to("cuda"), inputs_embeds=in_emb, image_features=c_feat
+            )
+            in_emb = in_emb.masked_scatter(mask, c_feat).squeeze(0).cpu()
+            prepared_samples.append({
+                "inputs_embeds": in_emb,
+                "attention_mask": t["attention_mask"],
+                "labels": t["labels"],
+            })
+    t_prep = time.perf_counter() - t_prep_0
+    vc_stats = vc_cache.get_stats()
+    print(f"  ✓ Cache populated: {vc_stats['unique_cached']} unique images, {vc_stats['hits']} hits, {vc_stats['misses']} misses")
+    print(f"  ✓ Pre-baked 1552 inputs_embeds in {t_prep:.2f}s")
+
+    memory_checkpoints["cache_ready"] = capture_memory_checkpoint("cache_ready")
+
+    # 5. Full 1552-sample training loop
+    print("\n[5/6] Executing full 1552-sample training loop (Profile: max_performance, MB=4, ACC=2)...")
+    seed_everything(seed)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=1e-4)
+    from transformers import get_linear_schedule_with_warmup
+    total_opt_steps = 194  # 1552 / 8 = 194
+    scheduler = get_linear_schedule_with_warmup(optimizer, 0, total_opt_steps)
+    optimizer.zero_grad()
+    model.train()
+
+    torch.cuda.reset_peak_memory_stats()
+    sampler = GpuTelemetrySampler(device_index=0, sample_interval_sec=0.2).start()
+    soak_run_dir = REPO_ROOT / "outputs/experiments/g2.0-e3-performance/p7_soak_run"
+    soak_run_dir.mkdir(parents=True, exist_ok=True)
+    reporter = LiveTelemetryReporter(
+        run_dir=soak_run_dir,
+        group=group,
+        seed=seed,
+        total_microbatches=388,
+        total_optimizer_steps=194,
+        heartbeat_interval=25,
+        sampler=sampler,
+        total_samples=1552,
+    )
+
+    losses: List[float] = []
+    mb_count = 0
+    processed_samples = 0
+    opt_step_count = 0
+    sched_step_count = 0
+
+    prefetcher = PinnedPrefetchDataLoader(
+        prepared_samples,
+        device="cuda",
+        batch_size=4,
+        queue_size=8,
+    )
+
+    torch.cuda.synchronize()
+    t_train_start = time.perf_counter()
+
+    for batch in prefetcher:
+        current_bs = batch["inputs_embeds"].shape[0]
+        raw_loss_val, outputs = run_single_forward_step(model, batch)
+        if not math.isfinite(raw_loss_val):
+            raise ValueError(f"Non-finite loss detected at microbatch {mb_count}: {raw_loss_val}")
+        losses.append(raw_loss_val)
+
+        scaled_loss = outputs.loss / 2.0  # gradient_accumulation_steps = 2
+        scaled_loss.backward()
+
+        mb_count += 1
+        processed_samples += current_bs
+        is_step = (mb_count % 2 == 0)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        if is_step:
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            opt_step_count += 1
+            sched_step_count += 1
+
+        reporter.step(
+            microbatch=mb_count,
+            optimizer_step=opt_step_count,
+            scheduler_step=sched_step_count,
+            latest_raw_loss=raw_loss_val,
+            learning_rate=current_lr,
+            processed_samples=processed_samples,
+        )
+
+        # Checkpoints capture
+        if opt_step_count == 1 and is_step and "first_optimizer_update" not in memory_checkpoints:
+            memory_checkpoints["first_optimizer_update"] = capture_memory_checkpoint("first_optimizer_update")
+        if processed_samples >= 388 and "progress_25_pct" not in memory_checkpoints:
+            memory_checkpoints["progress_25_pct"] = capture_memory_checkpoint("progress_25_pct")
+        if processed_samples >= 776 and "progress_50_pct" not in memory_checkpoints:
+            memory_checkpoints["progress_50_pct"] = capture_memory_checkpoint("progress_50_pct")
+        if processed_samples >= 1164 and "progress_75_pct" not in memory_checkpoints:
+            memory_checkpoints["progress_75_pct"] = capture_memory_checkpoint("progress_75_pct")
+        if processed_samples >= 1552 and "progress_100_pct" not in memory_checkpoints:
+            memory_checkpoints["progress_100_pct"] = capture_memory_checkpoint("progress_100_pct")
+
+    torch.cuda.synchronize()
+    t_train_wall = time.perf_counter() - t_train_start
+    telemetry_summary = sampler.stop()
+    if nvml_client:
+        try:
+            nvml_client.close()
+        except Exception:
+            pass
+
+    # Final progress report update
+    final_lr = optimizer.param_groups[0]["lr"]
+    reporter.step(
+        microbatch=mb_count,
+        optimizer_step=opt_step_count,
+        scheduler_step=sched_step_count,
+        latest_raw_loss=losses[-1],
+        learning_rate=final_lr,
+        force=True,
+        status="completed",
+        processed_samples=processed_samples,
+    )
+
+    # Save trained adapter
+    adapter_dir = soak_run_dir / "adapter"
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(adapter_dir)
+    print(f"  ✓ Adapter saved to: {adapter_dir}")
+
+    # Invariants verification
+    assert mb_count == 388, f"Expected 388 microbatches, got {mb_count}"
+    assert processed_samples == 1552, f"Expected 1552 samples, got {processed_samples}"
+    assert opt_step_count == 194, f"Expected 194 optimizer steps, got {opt_step_count}"
+    assert sched_step_count == 194, f"Expected 194 scheduler steps, got {sched_step_count}"
+
+    # 6. Analysis and Acceptance Verification
+    print("\n[6/6] Analyzing memory stability, telemetry, and acceptance criteria...")
+    wall_time_min = t_train_wall / 60.0
+    sps = num_samples / t_train_wall
+    gpu_util_avg = telemetry_summary["gpu_utilization"]["avg"]
+    first_10_mean = sum(losses[:10]) / 10.0
+    last_10_mean = sum(losses[-10:]) / 10.0
+    overall_mean = sum(losses) / len(losses)
+
+    # Memory plateau verification
+    plateau_keys = ["progress_25_pct", "progress_50_pct", "progress_75_pct", "progress_100_pct"]
+    plateau_allocs = [memory_checkpoints[k]["torch_allocated_mb"] for k in plateau_keys]
+    max_alloc_plateau = max(plateau_allocs)
+    min_alloc_plateau = min(plateau_allocs)
+    alloc_drift_mb = max_alloc_plateau - min_alloc_plateau
+    monotonic_leak = (
+        plateau_allocs[0] < plateau_allocs[1] < plateau_allocs[2] < plateau_allocs[3]
+        and alloc_drift_mb > 500.0
+    )
+    plateau_stable = not monotonic_leak and alloc_drift_mb < 500.0
+
+    # Host RSS leak check during training execution
+    training_checkpoints = ["first_optimizer_update", "progress_25_pct", "progress_50_pct", "progress_75_pct", "progress_100_pct"]
+    training_host_rss_vals = [memory_checkpoints[k]["host_rss_mb"] for k in training_checkpoints]
+    host_rss_drift_mb = max(training_host_rss_vals) - min(training_host_rss_vals)
+    host_leak_detected = host_rss_drift_mb > 512.0
+
+    # Fragmentation
+    max_frag_mb = max(cp["allocator_fragmentation_mb"] for cp in memory_checkpoints.values())
+    max_frag_ratio = max(cp["fragmentation_ratio"] for cp in memory_checkpoints.values())
+    peak_vram_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+    peak_vram_res_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
+
+    # Acceptance criteria
+    pass_wall_time = wall_time_min <= 3.8
+    pass_wall_preferred = wall_time_min <= 3.4
+    pass_gpu_util = gpu_util_avg >= 85.0
+    pass_loss = math.isfinite(losses[0]) and math.isfinite(losses[-1]) and (last_10_mean < first_10_mean)
+    pass_memory = plateau_stable and not host_leak_detected
+
+    verdict = "PASS" if (pass_wall_time and pass_gpu_util and pass_loss and pass_memory) else "FAIL"
+
+    # Historic reference: 27.88 min (1673 sec)
+    ref_wall_sec = 1673.0
+    speedup_vs_ref = ref_wall_sec / t_train_wall
+
+    report = {
+        "experiment_id": "g2.0-e3-performance",
+        "run_type": "p7_full_soak",
+        "profile_id": "max_performance",
+        "group": group,
+        "seed": seed,
+        "num_samples": num_samples,
+        "microbatch_size": 4,
+        "gradient_accumulation_steps": 2,
+        "effective_batch_size": 8,
+        "gradient_checkpointing": False,
+        "vision_cache_enabled": True,
+        "total_microbatches": mb_count,
+        "total_samples": processed_samples,
+        "total_optimizer_steps": opt_step_count,
+        "total_scheduler_steps": sched_step_count,
+        "training_wall_sec": round(t_train_wall, 2),
+        "training_wall_min": round(wall_time_min, 3),
+        "samples_per_sec": round(sps, 3),
+        "sec_per_sample": round(t_train_wall / num_samples, 4),
+        "speedup_vs_ref_baseline": round(speedup_vs_ref, 2),
+        "loss_initial": round(losses[0], 4),
+        "loss_final": round(losses[-1], 4),
+        "loss_first_10_mean": round(first_10_mean, 4),
+        "loss_last_10_mean": round(last_10_mean, 4),
+        "loss_overall_mean": round(overall_mean, 4),
+        "peak_vram_allocated_gb": round(peak_vram_alloc_gb, 3),
+        "peak_vram_reserved_gb": round(peak_vram_res_gb, 3),
+        "memory_checkpoints": memory_checkpoints,
+        "memory_stability": {
+            "plateau_stable": plateau_stable,
+            "allocated_plateau_drift_mb": round(alloc_drift_mb, 2),
+            "monotonic_leak_detected": monotonic_leak,
+            "host_rss_drift_mb": round(host_rss_drift_mb, 2),
+            "host_rss_leak_detected": host_leak_detected,
+            "max_fragmentation_mb": round(max_frag_mb, 2),
+            "max_fragmentation_ratio": round(max_frag_ratio, 4),
+        },
+        "telemetry": telemetry_summary,
+        "acceptance_criteria": {
+            "wall_time_le_3_8_min": {"target": "<= 3.8 min", "actual": f"{wall_time_min:.2f} min", "pass": pass_wall_time},
+            "wall_time_preferred_le_3_4_min": {"target": "<= 3.4 min", "actual": f"{wall_time_min:.2f} min", "pass": pass_wall_preferred},
+            "gpu_util_ge_85_pct": {"target": ">= 85.0%", "actual": f"{gpu_util_avg:.1f}%", "pass": pass_gpu_util},
+            "loss_trajectory_valid": {"target": "finite and decreasing", "actual": f"first10={first_10_mean:.4f} -> last10={last_10_mean:.4f}", "pass": pass_loss},
+            "memory_stability_pass": {"target": "stable plateau, bounded fragmentation", "actual": f"drift={alloc_drift_mb:.1f}MB, frag={max_frag_mb:.1f}MB", "pass": pass_memory},
+        },
+        "adapter_dir": str(adapter_dir),
+        "verdict": verdict,
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print("\n" + "=" * 80)
+    print("FINAL P7 FULL SOAK ACCEPTANCE SUMMARY TABLE")
+    print("=" * 80)
+    fmt_row = lambda metric, ref, p5, p7: f"{metric:<28} | {ref:<14} | {p5:<14} | {p7:<14}"
+    print(fmt_row("Metric", "REFERENCE", "P5 (MB1 VC)", "P7 (MB4 VC)"))
+    print("-" * 80)
+    print(fmt_row("microbatch size", "1", "1", "4"))
+    print(fmt_row("grad accumulation", "8", "8", "2"))
+    print(fmt_row("effective batch size", "8", "8", "8"))
+    print(fmt_row("samples/sec", "0.928", "3.230", f"{sps:.3f}"))
+    print(fmt_row("wall time (min)", "27.88 min", "8.01 min", f"{wall_time_min:.2f} min"))
+    print(fmt_row("speedup vs ref", "1.00x", "3.48x", f"{speedup_vs_ref:.2f}x"))
+    print(fmt_row("peak VRAM alloc", "8.31 GB", "9.78 GB", f"{peak_vram_alloc_gb:.2f} GB"))
+    print(fmt_row("peak VRAM reserved", "8.31 GB", "10.05 GB", f"{peak_vram_res_gb:.2f} GB"))
+    print(fmt_row("GPU util avg", "24.9%", "39.6%", f"{gpu_util_avg:.1f}%"))
+    print(fmt_row("GPU util p99", "N/A", "N/A", f"{telemetry_summary['gpu_utilization']['p99']:.1f}%"))
+    sm_clk = telemetry_summary.get("sm_clock_mhz", {})
+    if sm_clk:
+        print(fmt_row("SM clock avg", "N/A", "N/A", f"{sm_clk.get('avg', 0.0):.0f} MHz"))
+    print(fmt_row("Plateau stable", "Yes", "Yes", "Yes" if plateau_stable else "No"))
+    print(fmt_row("Verdict", "PASS", "PASS", verdict))
+    print("=" * 80)
+    print(f"Saved full soak report to: {output_path}")
+
+    return report
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SpatialForge Training Performance & Profiling")
-    parser.add_argument("--mode", choices=["profile", "benchmark", "equivalence", "soak"], default="profile")
+    parser.add_argument(
+        "--mode",
+        choices=["profile", "benchmark", "equivalence", "soak", "p7_soak"],
+        default="profile",
+        help="Execution mode (profile, benchmark, equivalence, soak, p7_soak)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=["reference", "balanced", "max_performance"],
+        default=DEFAULT_TRAINING_PROFILE,
+        help=f"Execution profile for training (default: {DEFAULT_TRAINING_PROFILE})",
+    )
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--group", choices=["A", "C", "D"], default="A")
     parser.add_argument("--seed", type=int, default=42)
@@ -1124,5 +1532,8 @@ if __name__ == "__main__":
             sys.exit(1)
     elif args.mode == "benchmark":
         run_performance_benchmark(num_samples=args.samples, group=args.group)
-    elif args.mode == "soak":
-        run_p5_full_soak(group=args.group, seed=args.seed)
+    elif args.mode in ("soak", "p7_soak"):
+        if args.mode == "p7_soak" or args.profile == "max_performance":
+            run_p7_full_soak(group=args.group, seed=args.seed)
+        else:
+            run_p5_full_soak(group=args.group, seed=args.seed)

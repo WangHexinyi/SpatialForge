@@ -16,7 +16,7 @@ Semantics & Invariants:
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -87,6 +87,227 @@ DEFAULT_WARMUP_STEPS = 0
 DEFAULT_SCHEDULER = "linear"
 
 
+# =====================================================================
+# Authoritative Training Profiles for G2.0-E3.3A
+# =====================================================================
+
+PROFILE_REFERENCE: str = "reference"
+PROFILE_BALANCED: str = "balanced"
+PROFILE_MAX_PERFORMANCE: str = "max_performance"
+
+# SpatialForge development / engineering execution default
+DEFAULT_TRAINING_PROFILE: str = PROFILE_MAX_PERFORMANCE
+
+
+class ProfileCapabilityError(RuntimeError):
+    """Raised when the requested training profile exceeds verified device capabilities.
+
+    Strictly enforces the NO SILENT FALLBACK rule.
+    """
+
+    def __init__(
+        self,
+        requested_profile: str,
+        required_memory_estimate: float,
+        available_memory: float,
+        recommended_profile: str,
+        message: Optional[str] = None,
+    ):
+        self.requested_profile = requested_profile
+        self.required_memory_estimate = required_memory_estimate
+        self.available_memory = available_memory
+        self.recommended_profile = recommended_profile
+        if message is None:
+            rec_suffix = (
+                f"{recommended_profile.capitalize()} is compatible."
+                if recommended_profile
+                else "No known execution profile fits within available memory."
+            )
+            message = (
+                f"{requested_profile} cannot safely start on the current device "
+                f"(requires ~{required_memory_estimate:.0f} MB, available: {available_memory:.0f} MB). "
+                f"{rec_suffix}"
+            )
+        super().__init__(message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": "ProfileCapabilityError",
+            "requested_profile": self.requested_profile,
+            "required_memory_estimate": self.required_memory_estimate,
+            "available_memory": self.available_memory,
+            "recommended_profile": self.recommended_profile,
+            "message": str(self),
+        }
+
+
+@dataclass(frozen=True)
+class TrainingProfile:
+    """Authoritative execution profile for SpatialForge training.
+
+    Guarantees:
+    - microbatch_size * gradient_accumulation_steps == effective_batch_size
+    - effective_batch_size == 8
+    """
+
+    profile_id: str
+    display_name: str
+    microbatch_size: int
+    gradient_accumulation_steps: int
+    effective_batch_size: int
+    gradient_checkpointing: bool
+    use_vision_cache: bool
+    intended_use: str
+    memory_estimate_mb: float
+    description: str
+
+    @property
+    def vision_cache_enabled(self) -> bool:
+        return self.use_vision_cache
+
+    def __post_init__(self):
+        if self.microbatch_size * self.gradient_accumulation_steps != self.effective_batch_size:
+            raise ValueError(
+                f"Profile {self.profile_id!r} invariant violated: "
+                f"microbatch_size ({self.microbatch_size}) * gradient_accumulation_steps ({self.gradient_accumulation_steps}) "
+                f"!= effective_batch_size ({self.effective_batch_size})"
+            )
+        if self.effective_batch_size != 8:
+            raise ValueError(
+                f"Profile {self.profile_id!r} invariant violated: effective_batch_size must be 8, got {self.effective_batch_size}"
+            )
+
+
+REFERENCE_PROFILE = TrainingProfile(
+    profile_id=PROFILE_REFERENCE,
+    display_name="Reference",
+    microbatch_size=1,
+    gradient_accumulation_steps=8,
+    effective_batch_size=8,
+    gradient_checkpointing=False,
+    use_vision_cache=True,
+    intended_use="strict reproduction / debugging / numerical regression",
+    memory_estimate_mb=19900.0,
+    description="P5 semantics: Single-sample microbatching with frozen vision caching, ensuring bitwise identical forward/backward accumulation.",
+)
+
+BALANCED_PROFILE = TrainingProfile(
+    profile_id=PROFILE_BALANCED,
+    display_name="Balanced",
+    microbatch_size=2,
+    gradient_accumulation_steps=4,
+    effective_batch_size=8,
+    gradient_checkpointing=False,
+    use_vision_cache=True,
+    intended_use="performance with substantial VRAM headroom",
+    memory_estimate_mb=23550.0,
+    description="P6 semantics: 2-sample post-vision microbatching with substantial (~9.2 GB) VRAM headroom and 1.86x speedup.",
+)
+
+MAX_PERFORMANCE_PROFILE = TrainingProfile(
+    profile_id=PROFILE_MAX_PERFORMANCE,
+    display_name="Max Performance",
+    microbatch_size=4,
+    gradient_accumulation_steps=2,
+    effective_batch_size=8,
+    gradient_checkpointing=False,
+    use_vision_cache=True,
+    intended_use="maximize iteration speed and productive GPU utilization on validated ~32 GB devices",
+    memory_estimate_mb=30900.0,
+    description="P7 semantics: 4-sample post-vision microbatching maximizing compute saturation (>8.3 sps, ~96% GPU util) on 32 GB devices.",
+)
+
+FIRST_CLASS_PROFILES: Dict[str, TrainingProfile] = {
+    PROFILE_REFERENCE: REFERENCE_PROFILE,
+    PROFILE_BALANCED: BALANCED_PROFILE,
+    PROFILE_MAX_PERFORMANCE: MAX_PERFORMANCE_PROFILE,
+}
+
+
+def get_profile(profile_id: Optional[Union[str, TrainingProfile]] = None) -> TrainingProfile:
+    """Retrieve authoritative TrainingProfile by ID or alias.
+
+    If profile_id is None, returns the development default ('max_performance').
+    """
+    if isinstance(profile_id, TrainingProfile):
+        return profile_id
+    if profile_id is None:
+        return MAX_PERFORMANCE_PROFILE
+
+    key = str(profile_id).strip().lower()
+    if key in ("max_performance", "max", "p7", "performance"):
+        return MAX_PERFORMANCE_PROFILE
+    if key in ("balanced", "p6", "perf_balanced"):
+        return BALANCED_PROFILE
+    if key in ("reference", "p5", "repro", "reference_repro", "candidate_p5_vision_cache"):
+        return REFERENCE_PROFILE
+
+    raise ValueError(
+        f"Unknown training profile: {profile_id!r}. "
+        f"Available profiles: {[PROFILE_REFERENCE, PROFILE_BALANCED, PROFILE_MAX_PERFORMANCE]}"
+    )
+
+
+def list_profiles() -> List[Dict[str, Any]]:
+    """Return structured metadata for all first-class training profiles for callers and future God View UI."""
+    return [
+        asdict(REFERENCE_PROFILE),
+        asdict(BALANCED_PROFILE),
+        asdict(MAX_PERFORMANCE_PROFILE),
+    ]
+
+
+def validate_profile_capability(
+    profile_or_id: Union[str, TrainingProfile],
+    available_memory_mb: Optional[float] = None,
+) -> None:
+    """Validate that target device satisfies profile requirements without silent fallback.
+
+    Args:
+        profile_or_id: Profile instance or string ID to validate.
+        available_memory_mb: Optional override for available memory in MB.
+                             If None, dynamically queries NVML or PyTorch.
+    Raises:
+        ProfileCapabilityError: If available memory is less than required memory estimate.
+    """
+    profile = get_profile(profile_or_id) if isinstance(profile_or_id, str) else profile_or_id
+
+    if available_memory_mb is None:
+        import torch
+        if not torch.cuda.is_available():
+            # In CPU environments, capability validation passes unless available_memory_mb is explicitly provided
+            return
+
+        try:
+            from spatialforge.experiment.performance import NVMLClient
+            client = NVMLClient(0)
+            stats = client.query()
+            client.close()
+            available_memory_mb = stats.get("nvml_gpu_memory_total_mb", 0.0)
+            if available_memory_mb <= 0.0:
+                available_memory_mb = float(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024))
+        except Exception:
+            available_memory_mb = float(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024))
+
+    if available_memory_mb < profile.memory_estimate_mb:
+        # Actionable recommendation: find highest profile that fits
+        if available_memory_mb >= BALANCED_PROFILE.memory_estimate_mb:
+            rec = PROFILE_BALANCED
+        elif available_memory_mb >= REFERENCE_PROFILE.memory_estimate_mb:
+            rec = PROFILE_REFERENCE
+        else:
+            rec = None
+
+        raise ProfileCapabilityError(
+            requested_profile=profile.profile_id,
+            required_memory_estimate=profile.memory_estimate_mb,
+            available_memory=available_memory_mb,
+            recommended_profile=rec,
+        )
+
+    return True
+
+
 @dataclass(frozen=True)
 class FormalTrainingConfig:
     """Frozen configuration for formal G2.0-E controlled training."""
@@ -100,10 +321,64 @@ class FormalTrainingConfig:
     warmup_steps: int = DEFAULT_WARMUP_STEPS
     scheduler: str = DEFAULT_SCHEDULER
     use_vision_cache: bool = False
+    training_profile_id: str = "reference"
+
+    @property
+    def effective_batch_size(self) -> int:
+        return self.per_device_train_batch_size * self.gradient_accumulation_steps
+
+    @classmethod
+    def from_profile(
+        cls,
+        profile_or_id: Optional[Union[str, TrainingProfile]] = None,
+        validate_capability: bool = True,
+        available_memory_mb: Optional[float] = None,
+        **overrides: Any,
+    ) -> "FormalTrainingConfig":
+        """Create FormalTrainingConfig from an authoritative TrainingProfile.
+
+        Defaults to development default ('max_performance').
+        """
+        profile = get_profile(profile_or_id)
+        if validate_capability:
+            validate_profile_capability(profile, available_memory_mb=available_memory_mb)
+
+        kwargs: Dict[str, Any] = {
+            "training_profile_id": profile.profile_id,
+            "per_device_train_batch_size": profile.microbatch_size,
+            "gradient_accumulation_steps": profile.gradient_accumulation_steps,
+            "gradient_checkpointing": profile.gradient_checkpointing,
+            "use_vision_cache": profile.use_vision_cache,
+            "learning_rate": DEFAULT_LEARNING_RATE,
+            "num_train_epochs": DEFAULT_EPOCHS,
+            "bf16": DEFAULT_BF16,
+            "warmup_steps": DEFAULT_WARMUP_STEPS,
+            "scheduler": DEFAULT_SCHEDULER,
+        }
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
+    def to_manifest_dict(self) -> Dict[str, Any]:
+        """Serialize exact execution profile and hyperparameters for provenance."""
+        return {
+            "training_profile_id": self.training_profile_id,
+            "microbatch_size": self.per_device_train_batch_size,
+            "per_device_train_batch_size": self.per_device_train_batch_size,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "effective_batch_size": self.effective_batch_size,
+            "gradient_checkpointing": self.gradient_checkpointing,
+            "vision_cache_enabled": self.use_vision_cache,
+            "use_vision_cache": self.use_vision_cache,
+            "learning_rate": self.learning_rate,
+            "num_train_epochs": self.num_train_epochs,
+            "bf16": self.bf16,
+            "warmup_steps": self.warmup_steps,
+            "scheduler": self.scheduler,
+        }
 
 
 # =====================================================================
-# Authoritative Execution Profiles for G2.0-E3
+# Historical and Named Execution Profiles for G2.0-E3
 # =====================================================================
 
 PROFILE_REFERENCE_REPRO: str = "REFERENCE_REPRO"
@@ -111,27 +386,24 @@ PROFILE_PERFORMANCE_FORMAL_P1: str = "PERFORMANCE_FORMAL_P1"
 PROFILE_PERFORMANCE_FORMAL: str = "PERFORMANCE_FORMAL"
 PROFILE_CANDIDATE_P5_VISION_CACHE: str = "CANDIDATE_P5_VISION_CACHE"
 
-# REFERENCE_REPRO: Exact historical E2/E3.2 config with gradient checkpointing
 REFERENCE_REPRO_CONFIG = FormalTrainingConfig(
     gradient_checkpointing=True,
     use_vision_cache=False,
+    training_profile_id="reference_repro",
 )
 
-# PERFORMANCE_FORMAL_P1: Mathematically validated high-throughput profile
-# (gradient_checkpointing=False, 1.95x speedup, identical loss sequence, safe 12.7GB VRAM)
 PERFORMANCE_FORMAL_P1_CONFIG = FormalTrainingConfig(
     gradient_checkpointing=False,
     use_vision_cache=False,
+    training_profile_id="performance_formal_p1",
 )
 
-# Formal default remains P1 pending final review promotion
 PERFORMANCE_FORMAL_CONFIG = PERFORMANCE_FORMAL_P1_CONFIG
 
-# CANDIDATE_P5_VISION_CACHE: Precomputed frozen visual representations
-# (gradient_checkpointing=False, use_vision_cache=True, 3.27x speedup, bitwise identical loss)
 CANDIDATE_P5_VISION_CACHE_CONFIG = FormalTrainingConfig(
     gradient_checkpointing=False,
     use_vision_cache=True,
+    training_profile_id="reference",
 )
 
 EXECUTION_PROFILES: Dict[str, FormalTrainingConfig] = {
@@ -139,27 +411,28 @@ EXECUTION_PROFILES: Dict[str, FormalTrainingConfig] = {
     PROFILE_PERFORMANCE_FORMAL_P1: PERFORMANCE_FORMAL_P1_CONFIG,
     PROFILE_PERFORMANCE_FORMAL: PERFORMANCE_FORMAL_CONFIG,
     PROFILE_CANDIDATE_P5_VISION_CACHE: CANDIDATE_P5_VISION_CACHE_CONFIG,
+    PROFILE_BALANCED: FormalTrainingConfig.from_profile(BALANCED_PROFILE, validate_capability=False),
+    PROFILE_MAX_PERFORMANCE: FormalTrainingConfig.from_profile(MAX_PERFORMANCE_PROFILE, validate_capability=False),
 }
 
 
-def get_execution_profile(profile_name: str) -> FormalTrainingConfig:
-    """Retrieve frozen execution profile by name.
-
-    Options:
-    - 'REFERENCE_REPRO': exact historical E2/E3.2 config (checkpointing=True).
-    - 'PERFORMANCE_FORMAL_P1': validated high-throughput profile (checkpointing=False, 1.95x speedup).
-    - 'PERFORMANCE_FORMAL': current formal high-throughput default (points to P1).
-    - 'CANDIDATE_P5_VISION_CACHE': precomputed frozen vision feature cache (3.27x speedup, bitwise loss).
-    """
-    key = profile_name.upper().strip()
+def get_execution_profile(profile_name: Optional[str] = None) -> FormalTrainingConfig:
+    """Retrieve frozen execution profile by name or alias."""
+    if profile_name is None:
+        profile_name = DEFAULT_TRAINING_PROFILE
+    key = str(profile_name).upper().strip()
     if key in EXECUTION_PROFILES:
         return EXECUTION_PROFILES[key]
-    if key in ("REFERENCE", "REPRO"):
+    if key in ("REFERENCE", "REPRO", "REFERENCE_REPRO"):
         return REFERENCE_REPRO_CONFIG
     if key in ("PERFORMANCE", "FORMAL", "OPT", "P1", "PERFORMANCE_FORMAL_P1"):
         return PERFORMANCE_FORMAL_P1_CONFIG
     if key in ("P5", "VISION_CACHE", "VC", "CANDIDATE_VISION_CACHE"):
         return CANDIDATE_P5_VISION_CACHE_CONFIG
+    if key in ("P6", "BALANCED"):
+        return FormalTrainingConfig.from_profile(BALANCED_PROFILE, validate_capability=False)
+    if key in ("P7", "MAX", "MAX_PERFORMANCE"):
+        return FormalTrainingConfig.from_profile(MAX_PERFORMANCE_PROFILE, validate_capability=False)
     raise ValueError(
         f"Unknown execution profile: {profile_name!r}. "
         f"Must be one of {list(EXECUTION_PROFILES.keys())}"
@@ -182,12 +455,18 @@ class SmokeTrainingConfig:
 
 
 def compute_formal_optimizer_steps(
-    num_samples: int,
+    num_samples: Optional[int] = None,
     gradient_accumulation_steps: int = DEFAULT_GRADIENT_ACCUMULATION_STEPS,
     epochs: int = DEFAULT_EPOCHS,
+    microbatch_size: int = 1,
+    num_records: Optional[int] = None,
+    num_train_epochs: Optional[int] = None,
 ) -> int:
     """Calculate exact optimizer steps for formal training (e.g. 1552 * 1 / 8 = 194)."""
-    return (num_samples * epochs) // gradient_accumulation_steps
+    n = num_samples if num_samples is not None else (num_records if num_records is not None else 0)
+    ep = num_train_epochs if num_train_epochs is not None else epochs
+    effective_batch = microbatch_size * gradient_accumulation_steps
+    return (n * ep) // effective_batch
 
 from spatialforge.experiment.evaluation import (
     DIRECTIONAL_VOCABULARY,
@@ -422,12 +701,26 @@ def run_single_forward_step(
     model: Any,
     batch: Dict[str, Any],
 ) -> Tuple[float, Any]:
-    """Execute a single forward step and return loss value and model outputs."""
+    """Execute a single forward step and return loss value and model outputs.
+
+    Uses compute_batched_per_example_loss when a multi-sample cached vision batch
+    is provided to guarantee exact per-example weighting (1/B sum L_i).
+    """
     import torch
+    from spatialforge.experiment.pipeline import compute_batched_per_example_loss
 
     with torch.set_grad_enabled(True):
-        outputs = model(**batch)
-        loss = outputs.loss
+        if "inputs_embeds" in batch and batch.get("labels") is not None and batch["inputs_embeds"].shape[0] > 1:
+            outputs = model(
+                inputs_embeds=batch["inputs_embeds"],
+                attention_mask=batch.get("attention_mask"),
+            )
+            _, loss = compute_batched_per_example_loss(outputs.logits, batch["labels"])
+            outputs.loss = loss
+        else:
+            outputs = model(**batch)
+            loss = outputs.loss
+
         if not torch.isfinite(loss):
             raise ValueError(f"Non-finite loss encountered in forward pass: {loss.item()}")
         return float(loss.item()), outputs
@@ -560,7 +853,7 @@ def run_formal_training_loop(
         seed_everything(seed)
 
     if config is None:
-        config = FormalTrainingConfig()
+        config = FormalTrainingConfig.from_profile(DEFAULT_TRAINING_PROFILE)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -577,11 +870,14 @@ def run_formal_training_loop(
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=config.learning_rate)
 
-    total_samples = len(records) if max_microbatches is None else min(len(records), max_microbatches)
+    microbatch_size = config.per_device_train_batch_size
+    total_samples = len(records) if max_microbatches is None else min(len(records), max_microbatches * microbatch_size)
+    total_microbatches = (total_samples + microbatch_size - 1) // microbatch_size
     total_optimizer_steps = compute_formal_optimizer_steps(
         total_samples,
         config.gradient_accumulation_steps,
         config.num_train_epochs,
+        microbatch_size=microbatch_size,
     )
     sched_steps = max(total_optimizer_steps, 1)
     scheduler = get_linear_schedule_with_warmup(
@@ -601,7 +897,7 @@ def run_formal_training_loop(
         run_dir=output_dir,
         group=group,
         seed=seed,
-        total_microbatches=total_samples,
+        total_microbatches=total_microbatches,
         total_optimizer_steps=total_optimizer_steps,
         heartbeat_interval=heartbeat_interval,
         sampler=sampler,
@@ -612,6 +908,7 @@ def run_formal_training_loop(
     step_records: List[TrainingStepState] = []
     raw_losses: List[float] = []
     microbatch_count = 0
+    processed_samples = 0
     optimizer_step_count = 0
     t0 = time.time()
     initial_vram = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -648,8 +945,14 @@ def run_formal_training_loop(
             prepared_samples = cache.get_or_build(target_records, processor, cache_key=cache_key)
 
         for epoch in range(config.num_train_epochs):
-            prefetcher = PinnedPrefetchDataLoader(prepared_samples, device=device, queue_size=8)
+            prefetcher = PinnedPrefetchDataLoader(
+                prepared_samples,
+                device=device,
+                batch_size=config.per_device_train_batch_size,
+                queue_size=8,
+            )
             for batch in prefetcher:
+                current_bs = batch["inputs_embeds"].shape[0] if "inputs_embeds" in batch else 1
                 raw_loss_val, outputs = run_single_forward_step(model, batch)
                 raw_losses.append(raw_loss_val)
 
@@ -657,6 +960,7 @@ def run_formal_training_loop(
                 scaled_loss.backward()
 
                 microbatch_count += 1
+                processed_samples += current_bs
                 is_step = (microbatch_count % config.gradient_accumulation_steps == 0)
 
                 current_lr = optimizer.param_groups[0]["lr"]
@@ -685,7 +989,7 @@ def run_formal_training_loop(
                     scheduler_step=optimizer_step_count,
                     latest_raw_loss=raw_loss_val,
                     learning_rate=current_lr,
-                    processed_samples=microbatch_count,
+                    processed_samples=processed_samples,
                 )
 
                 if max_microbatches is not None and microbatch_count >= max_microbatches:
@@ -708,6 +1012,7 @@ def run_formal_training_loop(
                 scaled_loss.backward()
 
                 microbatch_count += 1
+                processed_samples += 1
                 is_step = (microbatch_count % config.gradient_accumulation_steps == 0)
 
                 current_lr = optimizer.param_groups[0]["lr"]
@@ -736,6 +1041,7 @@ def run_formal_training_loop(
                     scheduler_step=optimizer_step_count,
                     latest_raw_loss=raw_loss_val,
                     learning_rate=current_lr,
+                    processed_samples=processed_samples,
                 )
 
     # Final telemetry update
@@ -749,7 +1055,7 @@ def run_formal_training_loop(
             learning_rate=final_lr,
             force=True,
             status="completed",
-            processed_samples=microbatch_count,
+            processed_samples=processed_samples,
         )
 
     telemetry_summary = sampler.stop() if sampler is not None else None
@@ -763,7 +1069,14 @@ def run_formal_training_loop(
     model.save_pretrained(adapter_dir)
 
     return {
+        "training_profile_id": config.training_profile_id,
+        "microbatch_size": config.per_device_train_batch_size,
+        "gradient_accumulation_steps": config.gradient_accumulation_steps,
+        "effective_batch_size": config.effective_batch_size,
+        "gradient_checkpointing": config.gradient_checkpointing,
+        "vision_cache_enabled": config.use_vision_cache,
         "total_microbatches": microbatch_count,
+        "total_samples": processed_samples,
         "total_optimizer_steps": optimizer_step_count,
         "initial_loss": raw_losses[0] if raw_losses else 0.0,
         "final_loss": raw_losses[-1] if raw_losses else 0.0,
@@ -773,6 +1086,8 @@ def run_formal_training_loop(
         "peak_vram_gb": peak_vram,
         "wall_time_sec": wall_time,
         "mean_microbatch_time_sec": wall_time / max(microbatch_count, 1),
+        "mean_sample_time_sec": wall_time / max(processed_samples, 1),
+        "samples_per_sec": processed_samples / max(wall_time, 0.001),
         "adapter_dir": str(adapter_dir),
         "telemetry": telemetry_summary,
         "vision_cache_stats": vc_cache.get_stats() if config.use_vision_cache else None,
