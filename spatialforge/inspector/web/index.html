@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpatialForge God View — Research Inspector</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/": "./vendor/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Top Navigation Bar (Two Rows) -->
+  <header class="top-bar">
+    <!-- Row 1: Brand, Inspector State, Privileged Truth Banner & Experiment Context -->
+    <div class="header-level-1">
+      <div class="brand-section">
+        <span class="brand-title">SPATIALFORGE</span>
+        <span class="brand-sub">Research Inspector</span>
+        <span class="version-label">G1.3</span>
+      </div>
+      <div class="privilege-banner">
+        <span class="status-dot status-dot-warning"></span>
+        <span>Privileged researcher truth &middot; never model input</span>
+      </div>
+      <div class="header-right-actions">
+        <button id="btn-experiment-drawer" class="btn-experiment-context" type="button" aria-expanded="false" title="Open Experiment Configuration &amp; Preflight">
+          <span class="exp-icon">&#9881;</span>
+          <span id="exp-context-label">Experiment &middot; No Run</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Row 2: Mode Switcher & Mode-Specific Context Controls -->
+    <div class="header-level-2">
+      <!-- Mode Switcher -->
+      <div class="mode-switch-container">
+        <button id="btn-mode-sample" class="mode-btn active" type="button">Inspect Sample</button>
+        <button id="btn-mode-explore" class="mode-btn" type="button">Explore Scene</button>
+        <button id="btn-mode-trajectory" class="mode-btn" type="button">Trajectory Lab</button>
+      </div>
+
+      <!-- Mode A Controls: Authoritative Sample Searchable Selector -->
+      <div id="mode-controls-sample" class="mode-controls-group">
+        <div class="sample-search-cluster">
+          <div class="sample-search-field">
+            <span class="search-icon">&#128269;</span>
+            <input type="text" id="sample-search-input" class="sample-search-input" placeholder="Search samples (ID, scene, view, family, or question)..." autocomplete="off" spellcheck="false" />
+            <div class="sample-stepper-btns">
+              <button id="btn-sample-prev" class="sample-nav-btn" type="button" title="Previous sample">&lsaquo;</button>
+              <button id="btn-sample-next" class="sample-nav-btn" type="button" title="Next sample">&rsaquo;</button>
+            </div>
+            <div id="sample-dropdown" class="sample-dropdown-menu" style="display: none;"></div>
+          </div>
+          <span id="sample-quiet-context" class="quiet-context-badge mono">-</span>
+        </div>
+        <!-- Hidden select kept for state sync / tests -->
+        <select id="sample-select" style="display: none;"></select>
+      </div>
+
+      <!-- Mode B Controls: Direct Scene and View Exploration -->
+      <div id="mode-controls-explore" class="mode-controls-group" style="display: none;">
+        <div class="control-group">
+          <label class="control-label" for="scene-select">Scene</label>
+          <select id="scene-select"></select>
+        </div>
+        <div class="control-group">
+          <label class="control-label" for="viewset-select">View Set</label>
+          <select id="viewset-select">
+            <option value="historical_8" selected>Historical 8 (Blender RGB)</option>
+            <option value="canonical_6">Canonical 6 (Axes)</option>
+            <option value="canonical_14">Canonical 14 (Axes+Corners)</option>
+            <option value="canonical_26">Canonical 26 (Full Canonical)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label class="control-label" for="view-select">View</label>
+          <div class="view-stepper-cluster" style="display: flex; align-items: center; gap: 3px;">
+            <button id="btn-view-prev" class="view-nav-btn" type="button" title="Previous view" style="width: 22px; height: 26px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); border-radius: 4px; cursor: pointer;">&lsaquo;</button>
+            <select id="view-select"></select>
+            <button id="btn-view-next" class="view-nav-btn" type="button" title="Next view" style="width: 22px; height: 26px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); border-radius: 4px; cursor: pointer;">&rsaquo;</button>
+            <span id="view-index-badge" class="quiet-context-badge mono" style="margin-left: 2px;">1 / 8</span>
+          </div>
+        </div>
+
+        <!-- Camera Distance Control (Section A) -->
+        <div class="control-group">
+          <label class="control-label" for="explore-dist-mode">Distance</label>
+          <select id="explore-dist-mode">
+            <option value="historical_fixed" selected>Historical (6.0m)</option>
+            <option value="adaptive">Adaptive</option>
+            <option value="manual">Manual</option>
+            <option value="adaptive_scale">Adaptive × Scale</option>
+          </select>
+        </div>
+        <div id="explore-manual-dist-wrap" class="control-group" style="display: none; align-items: center; gap: 5px;">
+          <input type="number" id="explore-dist-input" class="mono" min="0.5" max="20.0" step="0.1" value="6.0" style="width: 52px; height: 26px; font-size: 11px; padding: 2px 4px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-primary); border-radius: 4px;" title="Camera distance in meters" />
+          <span style="color: var(--text-muted); font-size: 11px;">m</span>
+          <input type="range" id="explore-dist-slider" min="0.5" max="20.0" step="0.1" value="6.0" style="width: 75px;" title="Drag camera distance" />
+        </div>
+        <div id="explore-scale-wrap" class="control-group" style="display: none;">
+          <select id="explore-scale-select">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1.0" selected>1.0×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2.0">2.0×</option>
+          </select>
+        </div>
+        <span id="explore-actual-dist" class="quiet-context-badge mono" title="Actual distance along ray">6.00m</span>
+        <span id="explore-quiet-context" class="quiet-context-badge mono">-</span>
+      </div>
+
+      <!-- Mode C Controls: Trajectory Lab & Control Plane (Row 1: Navigation / Context) -->
+      <div id="mode-controls-trajectory" class="mode-controls-group" style="display: none;">
+        <div class="control-group">
+          <label class="control-label" for="traj-scene-select">Scene</label>
+          <select id="traj-scene-select"></select>
+        </div>
+        <span id="traj-quiet-context" class="quiet-context-badge mono">-</span>
+      </div>
+    </div>
+
+    <!-- Row 3: Trajectory Controls Toolbar (Row 2 of Trajectory Lab) -->
+    <div id="traj-toolbar-row" class="traj-toolbar-row" style="display: none;">
+      <!-- Group A — PATH -->
+      <div class="traj-group traj-group-path">
+        <label class="control-label" for="traj-family-select">Path</label>
+        <select id="traj-family-select" class="traj-select-path">
+          <option value="survey_orbit" selected>Survey Orbit</option>
+          <option value="helical_sweep">Helical Sweep</option>
+          <option value="figure8_cross">Figure-8 Cross</option>
+          <option value="radial_probe">Radial Probe</option>
+          <option value="custom_waypoints">Custom Waypoints</option>
+          <option value="precessing_reference">Precessing (Ref)</option>
+        </select>
+      </div>
+
+      <!-- Group B — CAMERA -->
+      <div class="traj-group traj-group-camera">
+        <label class="control-label" for="traj-framing-select">Distance</label>
+        <select id="traj-framing-select" class="traj-select-dist">
+          <option value="balanced" selected>Adaptive: Balanced</option>
+          <option value="loose">Adaptive: Loose</option>
+          <option value="tight">Adaptive: Tight</option>
+          <option value="historical_fixed">Historical (6.0m)</option>
+          <option value="manual">Manual</option>
+          <option value="adaptive_scale">Adaptive × Scale</option>
+        </select>
+        <div id="traj-manual-dist-wrap" class="traj-dist-inputs" style="display: none;">
+          <div class="traj-num-unit">
+            <input type="number" id="traj-dist-input" class="mono" min="0.5" max="20.0" step="0.1" value="3.5" title="Manual camera distance in meters" />
+            <span class="unit-text">m</span>
+          </div>
+          <input type="range" id="traj-dist-slider" class="traj-dist-range" min="0.5" max="20.0" step="0.1" value="3.5" title="Drag manual distance" />
+        </div>
+        <div id="traj-scale-wrap" class="traj-scale-inputs" style="display: none;">
+          <select id="traj-scale-select" class="traj-select-scale">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1.0" selected>1.0×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2.0">2.0×</option>
+          </select>
+        </div>
+        <div class="traj-speed-cluster">
+          <label class="control-label" for="traj-speed-input">Speed</label>
+          <div class="traj-num-unit">
+            <input type="number" id="traj-speed-input" class="mono" value="1.0" min="0.1" max="10.0" step="0.25" title="Scientific camera motion speed in m/s" />
+            <span class="unit-text">m/s</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Group C — GENERATION / PLAYBACK -->
+      <div class="traj-group traj-group-playback">
+        <div class="traj-input-field">
+          <label class="control-label" for="traj-frames-select">Frames</label>
+          <select id="traj-frames-select">
+            <option value="30">30</option>
+            <option value="60" selected>60</option>
+            <option value="120">120</option>
+            <option value="180">180</option>
+          </select>
+        </div>
+        <div class="traj-input-field">
+          <label class="control-label" for="traj-seed-input">Seed</label>
+          <input type="number" id="traj-seed-input" class="traj-seed-input mono" value="0" min="0" max="99999" />
+        </div>
+        <button id="btn-traj-generate" class="traj-btn-action traj-btn-primary" type="button">Generate</button>
+        <button id="btn-traj-play" class="traj-btn-action traj-btn-play" type="button" title="Play/Pause continuous observation">▶ Play</button>
+        <button id="btn-traj-reset" class="traj-btn-action traj-btn-reset" type="button" title="Reset to frame 0">⏮</button>
+        <div class="traj-timeline-box">
+          <input type="range" id="traj-timeline-slider" min="0" max="59" value="0" class="traj-slider" />
+          <span id="traj-frame-counter" class="traj-counter mono">0 / 60</span>
+        </div>
+        <select id="traj-rate-select" class="traj-rate-select" title="Preview Playback Rate (UI clock multiplier)">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </div>
+
+      <!-- Group D — TOOLS -->
+      <div class="traj-group traj-group-tools">
+        <button id="btn-traj-waypoints-toggle" class="traj-btn-action traj-btn-secondary" type="button" title="Open Custom Waypoints Spline Editor">📍 Waypoints</button>
+        <div class="traj-adv-popover-wrap">
+          <button id="btn-traj-adv-toggle" class="traj-btn-action traj-btn-secondary" type="button" title="Toggle advanced waveform parameter popover">⚙ Advanced</button>
+          <!-- Collapsible Advanced Waveform Drawer / Popover -->
+          <div id="traj-adv-drawer" class="traj-adv-drawer" style="display: none;">
+            <div class="traj-adv-header">
+              <span class="traj-adv-title">Waveform Parameters (Experimental)</span>
+              <button id="btn-traj-adv-close" class="traj-adv-close" type="button">&times;</button>
+            </div>
+            <div class="traj-adv-grid">
+              <div class="traj-adv-field">
+                <label for="traj-cfg-az-cycles">Azimuth Cycles (k<sub>&theta;</sub>)</label>
+                <input type="number" id="traj-cfg-az-cycles" value="1.0" step="0.25" min="0.25" max="5.0" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-elev-base">Elevation Base &phi;<sub>0</sub> (&deg;)</label>
+                <input type="number" id="traj-cfg-elev-base" value="25.0" step="5" min="-10" max="50" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-elev-amp">Elevation Amplitude A<sub>&phi;</sub> (&deg;)</label>
+                <input type="number" id="traj-cfg-elev-amp" value="15.0" step="5" min="0" max="35" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-elev-cycles">Elevation Frequency (k<sub>&phi;</sub>)</label>
+                <input type="number" id="traj-cfg-elev-cycles" value="2.5" step="0.5" min="0.5" max="10.0" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-rad-amp">Radius Amplitude A<sub>r</sub></label>
+                <input type="number" id="traj-cfg-rad-amp" value="0.15" step="0.05" min="0.0" max="0.35" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-rad-cycles">Radius Frequency (k<sub>r</sub>)</label>
+                <input type="number" id="traj-cfg-rad-cycles" value="1.5" step="0.5" min="0.5" max="10.0" class="mono" />
+              </div>
+              <div class="traj-adv-field">
+                <label for="traj-cfg-bias-frac">Target Bias Fraction</label>
+                <input type="number" id="traj-cfg-bias-frac" value="0.10" step="0.02" min="0.0" max="0.25" class="mono" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Layout Split: Left 3D Viewport, Right Unified Inspector Surface -->
+  <main class="main-content">
+    <!-- Left: 3D God View (Full-height Interactive Viewport) -->
+    <section class="view-container-3d">
+      <div class="banner-3d">
+        <span class="status-dot status-dot-warning"></span>
+        <div class="banner-text">
+          <span class="banner-title">God View</span>
+          <span class="banner-sub">Privileged researcher truth &middot; never model input</span>
+        </div>
+      </div>
+      <canvas id="godview-canvas"></canvas>
+      <div class="hud-3d">
+        <span class="hud-hint">Orbit: L-Drag &middot; Pan: R-Drag &middot; Zoom: Wheel</span>
+        <button id="btn-reset-cam" class="hud-btn" type="button">Reset God Cam</button>
+        <button id="btn-align-obs" class="hud-btn" type="button">Align to Observation</button>
+        <button id="btn-toggle-support" class="hud-btn" type="button" title="Toggle 3D Support Relations">Support: On</button>
+        <button id="btn-toggle-canonical-cams" class="hud-btn" type="button" title="Toggle Canonical Camera Markers in God View">Cameras: 26 (Off)</button>
+        <span id="hud-cam-info">God Cam: (0.0, -10.0, 6.0)</span>
+      </div>
+    </section>
+
+    <!-- Right: ONE Unified Inspector Surface (Tabs: Sample | Object) -->
+    <aside class="inspector-surface">
+      <nav class="inspector-tabs" role="tablist">
+        <button id="tab-btn-sample" class="tab-btn active" type="button" role="tab" data-tab="sample" aria-selected="true">Sample</button>
+        <button id="tab-btn-trajectory" class="tab-btn" type="button" role="tab" data-tab="trajectory" aria-selected="false" style="display: none;">Trajectory Lab</button>
+        <button id="tab-btn-object" class="tab-btn" type="button" role="tab" data-tab="object" aria-selected="false">Object</button>
+      </nav>
+
+      <div class="inspector-scroll-area">
+        <!-- TAB 1: SAMPLE (Default Inspector Tab) -->
+        <div id="tab-panel-sample" class="tab-panel active" role="tabpanel">
+          <!-- 1. Observation Section -->
+          <section class="inspector-section observation-section">
+            <div class="section-header">
+              <h2 class="section-title">Actual Observation</h2>
+              <span class="section-sub">Model-permitted sensor input</span>
+            </div>
+            <div class="observation-body">
+              <div class="image-frame">
+                <img id="obs-image" src="" alt="Rendered observation">
+              </div>
+              <div class="observation-quiet-meta">
+                <span id="meta-scene-view" class="meta-item mono">-</span>
+                <span class="meta-bullet">&middot;</span>
+                <span id="meta-resolution" class="meta-item mono">512 &times; 512 px</span>
+                <span class="meta-bullet">&middot;</span>
+                <span id="meta-proj-status" class="meta-item mono">-</span>
+              </div>
+              <div id="meta-provenance" class="provenance-note"></div>
+            </div>
+          </section>
+
+          <!-- 2. Question Section -->
+          <section id="section-question" class="inspector-section question-section">
+            <div class="section-header">
+              <h2 class="section-title">Question</h2>
+              <span class="section-sub">Permitted natural-language input</span>
+            </div>
+            <div id="qa-question" class="question-text">Select a sample to inspect.</div>
+          </section>
+
+          <!-- 3. Prediction Section -->
+          <section id="section-prediction" class="inspector-section prediction-section">
+            <div class="section-header">
+              <h2 class="section-title">Prediction</h2>
+              <span class="section-sub">Supervised evaluation</span>
+            </div>
+            <div class="prediction-aligned-list">
+              <div class="pred-aligned-row">
+                <span class="pred-label">Model prediction</span>
+                <span id="qa-prediction" class="pred-val mono">-</span>
+              </div>
+              <div class="pred-aligned-row">
+                <span class="pred-label">Ground truth</span>
+                <span id="qa-target" class="pred-val mono">-</span>
+              </div>
+              <div class="pred-aligned-row pred-outcome-row">
+                <span class="pred-label">Outcome</span>
+                <span id="qa-outcome" class="status-indicator status-unavailable">-</span>
+              </div>
+              <div id="qa-raw-row" class="pred-raw-note" style="display: none;">
+                <span class="pred-raw-label">Raw output:</span>
+                <span id="qa-raw-val" class="mono">-</span>
+              </div>
+              <div id="qa-alignment-error" class="alignment-error-box" style="display: none;"></div>
+            </div>
+          </section>
+
+          <!-- 4. Relevant Spatial Truth Section -->
+          <section id="section-spatial-truth" class="inspector-section spatial-truth-section">
+            <div class="section-header">
+              <h2 class="section-title">Relevant Spatial Truth</h2>
+              <span class="section-sub">Question-frame authoritative truth</span>
+            </div>
+            <div id="truth-list" class="truth-list">
+              <!-- Dynamically populated rows -->
+            </div>
+            <div id="truth-perspective-note" class="truth-perspective-note"></div>
+          </section>
+
+          <!-- Explore Scene Mode Notice (Shown when in Explore mode instead of Q/P/T) -->
+          <div id="explore-sample-notice" class="explore-notice-card" style="display: none;">
+            <div class="explore-notice-title">Scene Exploration Mode</div>
+            <div class="explore-notice-text">Viewing pure scene geometry and camera observation. No QA evaluation active. Select any object in the 3D viewport to inspect its geometric state.</div>
+          </div>
+
+          <!-- Scene Challenge Summary (Restrained researcher view) -->
+          <section id="section-challenge-summary" class="inspector-section challenge-summary-section" style="display: none;">
+            <div class="section-header">
+              <div class="challenge-header-title-row">
+                <h2 class="section-title">Scene Challenge Summary</h2>
+                <span id="challenge-tier-badge" class="badge-challenge-tier mono">S0 &middot; Baseline</span>
+              </div>
+              <span class="section-sub">Controlled complexity &amp; reasoning pressure metrics</span>
+            </div>
+            <div class="challenge-summary-card">
+              <div class="challenge-metrics-grid">
+                <div class="challenge-metric-item">
+                  <span class="k">Objects</span>
+                  <span id="ch-metric-objects" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Depth Layers</span>
+                  <span id="ch-metric-layers" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Clutter Score</span>
+                  <span id="ch-metric-clutter" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Packing Density</span>
+                  <span id="ch-metric-density" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Elevated Objects</span>
+                  <span id="ch-metric-elevated" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Stacked Objects</span>
+                  <span id="ch-metric-stacked" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Support Relations</span>
+                  <span id="ch-metric-support" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Orientation Diverse</span>
+                  <span id="ch-metric-orientation" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Compound Assemblies</span>
+                  <span id="ch-metric-compound" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Overlap Candidates</span>
+                  <span id="ch-metric-overlap" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Similar Distractors</span>
+                  <span id="ch-metric-distractors" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Size-Dist Confounds</span>
+                  <span id="ch-metric-confounds" class="v mono">-</span>
+                </div>
+              </div>
+
+              <!-- Collapsible / Quiet Details -->
+              <div id="challenge-details-area" class="challenge-details-area">
+                <div id="ch-detail-support" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Support Relations:</span>
+                  <ul id="ch-support-list" class="ch-detail-list mono"></ul>
+                </div>
+                <div id="ch-detail-compound" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Compound Assemblies:</span>
+                  <ul id="ch-compound-list" class="ch-detail-list mono"></ul>
+                </div>
+                <div id="ch-detail-modes" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Placement Modes:</span>
+                  <div id="ch-modes-summary" class="ch-detail-text mono" style="font-size: 11px; color: var(--text-secondary);"></div>
+                </div>
+                <div id="ch-detail-distractors" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Distractor Pairs:</span>
+                  <ul id="ch-distractor-list" class="ch-detail-list mono"></ul>
+                </div>
+                <div id="ch-detail-overlap" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Projected Overlap Candidates:</span>
+                  <ul id="ch-overlap-list" class="ch-detail-list mono"></ul>
+                </div>
+                <div id="ch-detail-confounds" class="ch-detail-block" style="display: none;">
+                  <span class="ch-detail-label">Size-Distance Confounds:</span>
+                  <ul id="ch-confound-list" class="ch-detail-list mono"></ul>
+                </div>
+              </div>
+
+              <div class="disclaimer-callout challenge-disclaimer">
+                <span class="disclaimer-heading">Scientific Boundary</span>
+                <p>Projected-overlap candidates and clutter metrics are geometric heuristics for difficulty benchmarking. They do NOT represent authoritative visibility or occlusion truth.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- TAB 2: OBJECT (Contextual Object Inspector) -->
+        <div id="tab-panel-object" class="tab-panel" style="display: none;" role="tabpanel">
+          <section class="inspector-section object-section">
+            <div class="section-header">
+              <h2 class="section-title">Object Inspector</h2>
+              <span class="section-sub">Privileged geometric metadata</span>
+            </div>
+            <div id="object-inspector-body" class="object-inspector-content">
+              <div class="inspector-empty-msg">Select an object in the 3D scene to inspect its geometric state.</div>
+            </div>
+            <div class="disclaimer-callout">
+              <span class="disclaimer-heading">Critical Scientific Boundary</span>
+              <p><code>in_front_of_camera</code> evaluates front half-space geometry only (depth &gt; 0 along camera forward axis). It does NOT represent guaranteed visual visibility, field-of-view inclusion, or absence of occlusion.</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- TAB 3: TRAJECTORY LAB (Dynamic Observation Prototype) -->
+        <div id="tab-panel-trajectory" class="tab-panel" style="display: none;" role="tabpanel">
+          <!-- 1. Live Observation Preview -->
+          <section class="inspector-section observation-section">
+            <div class="section-header">
+              <h2 class="section-title">Live Observation Preview</h2>
+              <span class="section-sub">WebGL synthesized observation camera</span>
+            </div>
+            <div class="observation-body">
+              <div class="image-frame traj-preview-frame">
+                <canvas id="traj-preview-canvas" width="320" height="320"></canvas>
+              </div>
+              <div class="preview-disclaimer-callout">
+                <div class="disclaimer-badge-row">
+                  <span class="status-dot status-dot-warning"></span>
+                  <span class="disclaimer-badge">INTERACTIVE PREVIEW</span>
+                  <span class="disclaimer-badge-sub">Not Authoritative Training RGB</span>
+                </div>
+                <p class="disclaimer-detail">Synthesized directly via browser WebGL from current trajectory CameraPose. Visual debugging prototype only; never rendered with Blender Cycles and strictly isolated from dataset generation and model input.</p>
+              </div>
+              <div class="observation-quiet-meta">
+                <span id="traj-meta-pos" class="meta-item mono">Pos: -</span>
+                <span class="meta-bullet">&middot;</span>
+                <span id="traj-meta-look" class="meta-item mono">Target: -</span>
+                <span class="meta-bullet">&middot;</span>
+                <span id="traj-meta-fov" class="meta-item mono">FOV: 60°</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 2. Adaptive Framing Analysis -->
+          <section class="inspector-section framing-section">
+            <div class="section-header">
+              <h2 class="section-title">Adaptive Framing Comparison</h2>
+              <span class="section-sub">Scene-aware extent vs Historical fixed r=6m</span>
+            </div>
+            <div class="framing-analysis-card">
+              <div class="framing-metrics-grid">
+                <div class="framing-metric-item">
+                  <span class="k">Scene Center</span>
+                  <span id="framing-scene-center" class="v mono">-</span>
+                </div>
+                <div class="framing-metric-item">
+                  <span class="k">Scene Radius (R)</span>
+                  <span id="framing-scene-radius" class="v mono">-</span>
+                </div>
+                <div class="framing-metric-item">
+                  <span class="k">Active Distance (r₀)</span>
+                  <span id="framing-active-dist" class="v mono">-</span>
+                </div>
+                <div class="framing-metric-item">
+                  <span class="k">Instant Radius r(t)</span>
+                  <span id="framing-instant-radius" class="v mono">-</span>
+                </div>
+              </div>
+              <div class="framing-presets-table-wrap">
+                <table class="framing-table">
+                  <thead>
+                    <tr>
+                      <th>Preset</th>
+                      <th>Target Occupancy</th>
+                      <th>Camera Distance</th>
+                      <th>Rel. to Fixed</th>
+                    </tr>
+                  </thead>
+                  <tbody id="framing-table-body">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+              <div id="framing-margin-note" class="provenance-note"></div>
+            </div>
+          </section>
+
+          <!-- 3. Custom Waypoint Spline Editor -->
+          <section id="section-waypoint-editor" class="inspector-section waypoint-editor-section" style="display: none;">
+            <div class="section-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <h2 class="section-title">Custom Waypoint Editor</h2>
+                <span id="waypoint-count-badge" class="badge-challenge-tier mono" style="font-size: 10px; padding: 1px 6px;">4 pts</span>
+              </div>
+              <span class="section-sub">User-defined 3D keyframes &middot; Centripetal Catmull-Rom &middot; Arc-length resampled</span>
+            </div>
+            <div class="waypoint-editor-card">
+              <!-- Editor Toolbar -->
+              <div class="waypoint-toolbar-row">
+                <div class="control-group" style="flex: 1;">
+                  <label class="control-label" for="waypoint-interp-mode">Curve Mode</label>
+                  <select id="waypoint-interp-mode" style="height: 24px; font-size: 11px;">
+                    <option value="catmull_rom" selected>Catmull-Rom Centripetal</option>
+                    <option value="linear">Linear Piecewise</option>
+                  </select>
+                </div>
+                <div class="waypoint-actions-cluster">
+                  <button id="btn-waypoint-add" class="waypoint-action-btn" type="button" title="Add a new waypoint at end">+ Add Pt</button>
+                  <button id="btn-waypoint-toggle-paste" class="waypoint-action-btn" type="button" title="Toggle multiline text paste box">📋 Paste</button>
+                  <button id="btn-waypoint-example" class="waypoint-action-btn" type="button" title="Load sample spiral/orbit waypoints">Example</button>
+                  <button id="btn-waypoint-clear" class="waypoint-action-btn waypoint-btn-danger" type="button" title="Clear all waypoints">Clear</button>
+                </div>
+              </div>
+
+              <!-- Multiline Text Paste Box (Collapsible) -->
+              <div id="waypoint-paste-box" class="waypoint-paste-box" style="display: none;">
+                <div class="waypoint-paste-header">
+                  <span style="font-size: 10.5px; color: var(--text-secondary);">Multiline Paste (format: <code>x, y, z</code> or <code>x, y, z, tx, ty, tz</code>)</span>
+                  <button id="btn-waypoint-close-paste" type="button" class="traj-adv-close">&times;</button>
+                </div>
+                <textarea id="waypoint-paste-textarea" class="mono waypoint-paste-area" rows="5" placeholder="# Enter x,y,z or x,y,z,tx,ty,tz per line&#10;3.0, -3.0, 2.0&#10;0.0, -4.0, 2.5&#10;-3.0, -3.0, 2.0&#10;0.0, -2.0, 1.5"></textarea>
+                <div class="waypoint-paste-footer">
+                  <button id="btn-waypoint-apply-paste" class="waypoint-action-btn waypoint-btn-highlight" type="button">Apply Paste</button>
+                  <button id="btn-waypoint-export-text" class="waypoint-action-btn" type="button">Copy Current</button>
+                  <span id="waypoint-paste-feedback" class="mono" style="font-size: 10px; color: var(--warning); margin-left: auto;"></span>
+                </div>
+              </div>
+
+              <!-- Waypoint Table Container -->
+              <div class="waypoint-table-wrap">
+                <table class="waypoint-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 24px;">#</th>
+                      <th>Pos X</th>
+                      <th>Pos Y</th>
+                      <th>Pos Z</th>
+                      <th>Target (tx,ty,tz)</th>
+                      <th style="width: 70px; text-align: right;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="waypoint-tbody">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Waypoint Path Summary Bar -->
+              <div class="waypoint-summary-bar">
+                <span id="waypoint-summary-text" class="mono" style="font-size: 10.5px; color: var(--text-secondary);">Points: 4 &middot; Mode: Centripetal &middot; Interpolated to frames</span>
+                <button id="btn-waypoint-sync-generate" class="traj-btn-action traj-btn-primary" type="button" style="margin-left: auto; height: 24px; padding: 2px 10px; font-size: 11px;">Update Path</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- 4. Trajectory Diagnostics -->
+          <section class="inspector-section trajectory-diag-section">
+            <div class="section-header">
+              <h2 class="section-title">Prototype Trajectory Diagnostics</h2>
+              <span class="section-sub">Geometric variation &amp; near-repeat analysis</span>
+            </div>
+            <div class="diag-card">
+              <div class="diag-grid">
+                <div class="diag-item">
+                  <span class="k">Azimuth Span</span>
+                  <span id="diag-az-span" class="v mono">-</span>
+                </div>
+                <div class="diag-item">
+                  <span class="k">Elevation Range</span>
+                  <span id="diag-elev-range" class="v mono">-</span>
+                </div>
+                <div class="diag-item">
+                  <span class="k">Radius Range</span>
+                  <span id="diag-radius-range" class="v mono">-</span>
+                </div>
+                <div class="diag-item">
+                  <span class="k">Path Arc Length</span>
+                  <span id="diag-path-length" class="v mono">-</span>
+                </div>
+                <div class="diag-item diag-full">
+                  <span class="k">Near-Repeat Diagnostic</span>
+                  <span id="diag-near-repeat" class="v mono">-</span>
+                </div>
+              </div>
+              <div id="diag-summary-note" class="provenance-note"></div>
+            </div>
+          </section>
+
+          <!-- 4. Trajectory Scene Challenge Summary -->
+          <section id="section-traj-challenge-summary" class="inspector-section challenge-summary-section">
+            <div class="section-header">
+              <div class="challenge-header-title-row">
+                <h2 class="section-title">Scene Challenge Profile</h2>
+                <span id="traj-challenge-tier-badge" class="badge-challenge-tier mono">S0 &middot; Baseline</span>
+              </div>
+              <span class="section-sub">Dynamic observation target complexity</span>
+            </div>
+            <div class="challenge-summary-card">
+              <div class="challenge-metrics-grid">
+                <div class="challenge-metric-item">
+                  <span class="k">Objects</span>
+                  <span id="traj-ch-metric-objects" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Depth Layers</span>
+                  <span id="traj-ch-metric-layers" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Clutter Score</span>
+                  <span id="traj-ch-metric-clutter" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Elevated</span>
+                  <span id="traj-ch-metric-elevated" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Stacked</span>
+                  <span id="traj-ch-metric-stacked" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Support</span>
+                  <span id="traj-ch-metric-support" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Orientation</span>
+                  <span id="traj-ch-metric-orientation" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Compound</span>
+                  <span id="traj-ch-metric-compound" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Overlap Candidates</span>
+                  <span id="traj-ch-metric-overlap" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item">
+                  <span class="k">Distractors</span>
+                  <span id="traj-ch-metric-distractors" class="v mono">-</span>
+                </div>
+                <div class="challenge-metric-item challenge-span-2">
+                  <span class="k">Confounds</span>
+                  <span id="traj-ch-metric-confounds" class="v mono">-</span>
+                </div>
+              </div>
+              <div id="traj-ch-summary-note" class="provenance-note"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Experiment Context Drawer & Backdrop -->
+  <div id="drawer-backdrop" class="drawer-backdrop" style="display: none;"></div>
+  <aside id="experiment-drawer" class="experiment-drawer" style="display: none;" aria-hidden="true">
+    <div class="drawer-header">
+      <div class="drawer-header-titles">
+        <h2 class="drawer-title">Experiment Context &amp; Preflight</h2>
+        <span class="drawer-subtitle">Secondary execution configuration</span>
+      </div>
+      <button id="btn-close-drawer" class="btn-drawer-close" type="button" title="Close drawer">&times;</button>
+    </div>
+    <div class="drawer-content">
+      <!-- Run Configuration -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Inspected Run</div>
+        <div class="drawer-field">
+          <label class="drawer-label" for="run-select">Run</label>
+          <select id="run-select">
+            <option value="">-- Pure Scene (No Run) --</option>
+          </select>
+        </div>
+        <div class="run-info-grid">
+          <div class="run-info-item"><span class="k">Model</span><span id="drawer-model" class="v mono">-</span></div>
+          <div class="run-info-item"><span class="k">Seed</span><span id="drawer-seed" class="v mono">-</span></div>
+          <div class="run-info-item"><span class="k">Group</span><span id="drawer-group" class="v mono">-</span></div>
+          <div class="run-info-item"><span class="k">Status</span><span id="drawer-status" class="v mono">-</span></div>
+        </div>
+      </div>
+
+      <!-- Training Profile & Hardware Preflight -->
+      <div class="drawer-section">
+        <div class="drawer-section-title">Hardware Profile &amp; Preflight</div>
+        <div class="drawer-field">
+          <label class="drawer-label" for="profile-select">Profile</label>
+          <select id="profile-select"></select>
+        </div>
+        <div class="profile-specs-grid">
+          <div class="profile-spec-row"><span class="k">Microbatch Size (MB)</span><span id="spec-mb" class="v mono">-</span></div>
+          <div class="profile-spec-row"><span class="k">Gradient Accumulation</span><span id="spec-acc" class="v mono">-</span></div>
+          <div class="profile-spec-row"><span class="k">Effective Batch</span><span id="spec-eff" class="v mono">-</span></div>
+          <div class="profile-spec-row"><span class="k">Memory Estimate</span><span id="spec-mem" class="v mono">-</span></div>
+          <div class="profile-spec-row"><span class="k">Available Memory</span><span id="spec-avail" class="v mono">-</span></div>
+        </div>
+        <div class="drawer-action-row">
+          <button id="btn-preflight" class="btn-preflight-run" type="button">Run Preflight Check</button>
+        </div>
+        <div id="profile-alert-box" class="profile-alert" style="display: none;"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Bottom Telemetry Status Bar -->
+  <footer class="status-bar">
+    <div class="status-group status-left">
+      <div class="status-item status-state">
+        <span id="telem-status-dot" class="status-dot status-dot-muted"></span>
+        <span id="telem-freshness" class="status-label">Standby</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span class="t-muted">Run:</span>
+        <span id="telem-run" class="t-val">None</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span class="t-muted">Samples:</span>
+        <span id="telem-samples" class="t-val">- / -</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span class="t-muted">Steps:</span>
+        <span id="telem-steps" class="t-val">- / -</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span class="t-muted">Loss:</span>
+        <span id="telem-loss" class="t-val">-</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span id="telem-sps" class="t-val">- samples/s</span>
+      </div>
+    </div>
+
+    <div class="status-group status-right">
+      <div class="status-item">
+        <span class="t-muted">GPU:</span>
+        <span id="telem-gpu-util" class="t-val">- %</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span class="t-muted">VRAM:</span>
+        <span id="telem-vram" class="t-val">- GB</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span id="telem-power" class="t-val">- W</span>
+      </div>
+      <span class="status-sep">|</span>
+      <div class="status-item">
+        <span id="telem-clock" class="t-val">- MHz</span>
+      </div>
+    </div>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
