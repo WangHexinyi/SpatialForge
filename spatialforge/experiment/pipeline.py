@@ -396,6 +396,42 @@ class FrozenVisionFeatureCache:
             self.misses = 0
 
 
+def collate_cached_vision_batch(items: Sequence[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    """Collate multiple post-vision sample dicts into a right-padded batch.
+
+    Pads inputs_embeds with 0.0, attention_mask with 0, and labels with -100.
+    Ensures bitwise preservation of each sample's unpadded token sequence.
+    """
+    batch_size = len(items)
+    if batch_size == 1:
+        item = items[0]
+        return {
+            "inputs_embeds": item["inputs_embeds"].unsqueeze(0) if item["inputs_embeds"].ndim == 2 else item["inputs_embeds"],
+            "attention_mask": item["attention_mask"].unsqueeze(0) if item["attention_mask"].ndim == 1 else item["attention_mask"],
+            "labels": item["labels"].unsqueeze(0) if item["labels"].ndim == 1 else item["labels"],
+        }
+
+    max_len = max(item["inputs_embeds"].shape[0] for item in items)
+    hidden_dim = items[0]["inputs_embeds"].shape[1]
+    dtype = items[0]["inputs_embeds"].dtype
+
+    batched_embeds = torch.zeros((batch_size, max_len, hidden_dim), dtype=dtype)
+    batched_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+    batched_labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
+
+    for i, item in enumerate(items):
+        seq_len = item["inputs_embeds"].shape[0]
+        batched_embeds[i, :seq_len] = item["inputs_embeds"]
+        batched_mask[i, :seq_len] = item["attention_mask"]
+        batched_labels[i, :seq_len] = item["labels"]
+
+    return {
+        "inputs_embeds": batched_embeds,
+        "attention_mask": batched_mask,
+        "labels": batched_labels,
+    }
+
+
 # =====================================================================
 # Deterministic Bounded Prefetch Iterator with Pinned Host Memory
 # =====================================================================
@@ -415,11 +451,13 @@ class PinnedPrefetchDataLoader:
         self,
         samples: Sequence[Dict[str, Any]],
         device: str = "cuda",
+        batch_size: int = 1,
         queue_size: int = 8,
         pin_memory: bool = True,
     ):
         self.samples = list(samples)
         self.device = device
+        self.batch_size = max(1, batch_size)
         self.queue_size = max(2, queue_size)
         self.pin_memory = pin_memory and torch.cuda.is_available() and device.startswith("cuda")
         self._queue: queue.Queue = queue.Queue(maxsize=self.queue_size)
@@ -427,15 +465,16 @@ class PinnedPrefetchDataLoader:
         self._worker: Optional[threading.Thread] = None
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return (len(self.samples) + self.batch_size - 1) // self.batch_size
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         self._stop_event.clear()
         self._worker = threading.Thread(target=self._produce, daemon=True, name="PrefetchWorker")
         self._worker.start()
 
+        num_batches = len(self)
         try:
-            for _ in range(len(self.samples)):
+            for _ in range(num_batches):
                 item = self._queue.get()
                 if item is None:
                     break
@@ -470,18 +509,16 @@ class PinnedPrefetchDataLoader:
 
     def _produce(self) -> None:
         try:
-            for item in self.samples:
+            for i in range(0, len(self.samples), self.batch_size):
                 if self._stop_event.is_set():
                     break
+                batch_items = self.samples[i : i + self.batch_size]
 
-                # Collate single sample on host
-                if "inputs_embeds" in item:
-                    collated = {
-                        "inputs_embeds": item["inputs_embeds"].unsqueeze(0) if item["inputs_embeds"].ndim == 2 else item["inputs_embeds"],
-                        "attention_mask": item["attention_mask"].unsqueeze(0) if item["attention_mask"].ndim == 1 else item["attention_mask"],
-                        "labels": item["labels"].unsqueeze(0) if item["labels"].ndim == 1 else item["labels"],
-                    }
+                # Collate batch on host
+                if "inputs_embeds" in batch_items[0]:
+                    collated = collate_cached_vision_batch(batch_items)
                 else:
+                    item = batch_items[0]
                     collated = {
                         "input_ids": item["input_ids"].unsqueeze(0),
                         "attention_mask": item["attention_mask"].unsqueeze(0),

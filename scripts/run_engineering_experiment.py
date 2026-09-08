@@ -72,13 +72,18 @@ from spatialforge.experiment.protocol import (
     verify_frozen_e1_datasets,
 )
 from spatialforge.experiment.training import (
+    DEFAULT_TRAINING_PROFILE,
     FormalTrainingConfig,
+    ProfileCapabilityError,
+    compute_formal_optimizer_steps,
     create_lora_config,
     format_chat_prompt,
     get_language_model_target_modules,
+    get_profile,
     load_and_preprocess_image,
     load_training_records,
     run_formal_training_loop,
+    validate_profile_capability,
 )
 
 
@@ -88,7 +93,7 @@ def compute_config_hash(cfg: Dict[str, Any]) -> str:
     return hashlib.sha256(cfg_json.encode("utf-8")).hexdigest()
 
 
-def run_preflight() -> Dict[str, Any]:
+def run_preflight(profile_id: Optional[str] = None) -> Dict[str, Any]:
     """Execute all preflight checks; fail hard if any requirement is violated."""
     print("=" * 70)
     print("G2.0-E3.2 PREFLIGHT INTEGRITY CHECKS")
@@ -143,12 +148,19 @@ def run_preflight() -> Dict[str, Any]:
     assert lora_cfg.lora_dropout == 0.05
     print("  ✓ LoRA configuration: r=8, alpha=16, dropout=0.05, 252 LM modules, 0 vision")
 
-    # 5. Training optimizer steps
-    print("[5/9] Verifying formal optimizer step count...")
-    train_cfg = FormalTrainingConfig()
-    opt_steps = (1552 * train_cfg.num_train_epochs) // train_cfg.gradient_accumulation_steps
+    # 5. Training optimizer steps and profile capability
+    print("[5/9] Verifying formal optimizer step count and profile capability...")
+    prof = get_profile(profile_id or DEFAULT_TRAINING_PROFILE)
+    validate_profile_capability(prof)
+    train_cfg = FormalTrainingConfig.from_profile(prof.profile_id, validate_capability=False)
+    opt_steps = compute_formal_optimizer_steps(
+        1552,
+        train_cfg.gradient_accumulation_steps,
+        train_cfg.num_train_epochs,
+        microbatch_size=train_cfg.per_device_train_batch_size,
+    )
     assert opt_steps == 194, f"Expected 194 optimizer steps, got {opt_steps}"
-    print(f"  ✓ Formal optimizer steps: 1552 / 8 = {opt_steps}")
+    print(f"  ✓ Profile '{prof.profile_id}' (MB{prof.microbatch_size}xACC{prof.gradient_accumulation_steps}): 1552 / {prof.effective_batch_size} = {opt_steps}")
 
     # 6. Parser hardening checks
     print("[6/9] Verifying parser hardening against adversarial cases...")
@@ -187,17 +199,21 @@ def run_preflight() -> Dict[str, Any]:
         "git_sha": git_sha,
         "provenance": prov,
         "opt_steps": opt_steps,
+        "profile_id": prof.profile_id,
     }
 
 
 def freeze_run_configs(
     preflight: Dict[str, Any],
     base_dir: Optional[Path] = None,
+    profile_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Materialize and freeze all 4 run configs before any model execution."""
     print("=" * 70)
     print("FREEZING RUN CONFIGURATIONS (B, A42, C42, D42)")
     print("=" * 70)
+
+    active_profile_id = profile_id or preflight.get("profile_id", DEFAULT_TRAINING_PROFILE)
 
     eval_dataset_hashes = {
         "synthetic_s1": FROZEN_E1_DATASET_HASHES["holdout_s1_cardinal.jsonl"],
@@ -232,7 +248,8 @@ def freeze_run_configs(
         if grp != "B":
             fname = FROZEN_E1_GROUP_TO_FILE[f"group_{grp.lower()}"]
             train_hash = FROZEN_E1_DATASET_HASHES[fname]
-            train_cfg_dict = asdict(FormalTrainingConfig())
+            train_cfg = FormalTrainingConfig.from_profile(active_profile_id, validate_capability=False)
+            train_cfg_dict = train_cfg.to_manifest_dict()
             lora_cfg_dict = {
                 "r": 8,
                 "lora_alpha": 16,
@@ -274,6 +291,12 @@ def freeze_run_configs(
             "git_commit": preflight["git_sha"],
             "model_id": MODEL_ID,
             "model_revision": preflight["model_revision"],
+            "training_profile_id": train_cfg_dict.get("training_profile_id") if train_cfg_dict else None,
+            "microbatch_size": train_cfg_dict.get("microbatch_size") if train_cfg_dict else None,
+            "gradient_accumulation_steps": train_cfg_dict.get("gradient_accumulation_steps") if train_cfg_dict else None,
+            "effective_batch_size": train_cfg_dict.get("effective_batch_size") if train_cfg_dict else None,
+            "gradient_checkpointing": train_cfg_dict.get("gradient_checkpointing") if train_cfg_dict else None,
+            "vision_cache_enabled": train_cfg_dict.get("vision_cache_enabled") if train_cfg_dict else None,
             "start_time": None,
             "end_time": None,
             "artifacts": {},
@@ -477,11 +500,15 @@ def train_and_eval_group(
     seed: int,
     preflight: Dict[str, Any],
     frozen_configs: Dict[str, Dict[str, Any]],
+    profile_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute training, adapter save, fresh base reload, and evaluation for group A/C/D."""
+    active_profile_id = profile_id or preflight.get("profile_id", DEFAULT_TRAINING_PROFILE)
+    train_cfg = FormalTrainingConfig.from_profile(active_profile_id, validate_capability=False)
+
     run_key = f"group_{group.lower()}_seed_{seed}"
     print("=" * 70)
-    print(f"EXECUTING CONDITION: GROUP {group} (Seed {seed})")
+    print(f"EXECUTING CONDITION: GROUP {group} (Seed {seed}) [Profile: {train_cfg.training_profile_id}]")
     print("=" * 70)
 
     run_dir = get_run_output_dir(group, seed, base_dir=REPO_ROOT / "outputs/experiments")
@@ -499,7 +526,8 @@ def train_and_eval_group(
     # 2. Attach language-only LoRA
     print("  [Step 2] Attaching language-only LoRA (252 modules)...")
     model.enable_input_require_grads()
-    model.gradient_checkpointing_enable()
+    if train_cfg.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
     lora_cfg = create_lora_config()
     model = get_peft_model(model, lora_cfg)
 
@@ -514,8 +542,8 @@ def train_and_eval_group(
     print(f"  ✓ Loaded {len(train_records)} formal training records from {dataset_rel_path}")
 
     # 4. Formal training loop
-    print("  [Step 3] Running formal training loop (1552 microbatches, 194 optimizer steps)...")
-    train_cfg = FormalTrainingConfig()
+    expected_mb = 1552 // train_cfg.per_device_train_batch_size
+    print(f"  [Step 3] Running formal training loop ({expected_mb} microbatches, 194 optimizer steps)...")
     t_train_0 = time.time()
     train_res = run_formal_training_loop(
         model=model,
@@ -528,7 +556,8 @@ def train_and_eval_group(
     )
     t_train = time.time() - t_train_0
 
-    assert train_res["total_microbatches"] == 1552
+    assert train_res["total_microbatches"] == expected_mb
+    assert train_res["total_samples"] == 1552
     assert train_res["total_optimizer_steps"] == 194
     adapter_dir = Path(train_res["adapter_dir"])
     assert adapter_dir.exists(), f"Adapter dir not found: {adapter_dir}"
@@ -542,6 +571,11 @@ def train_and_eval_group(
     train_metrics = {
         "group": group,
         "seed": seed,
+        "training_profile_id": train_cfg.training_profile_id,
+        "microbatch_size": train_cfg.per_device_train_batch_size,
+        "gradient_accumulation_steps": train_cfg.gradient_accumulation_steps,
+        "effective_batch_size": train_cfg.effective_batch_size,
+        "sample_count": train_res["total_samples"],
         "microbatch_count": train_res["total_microbatches"],
         "optimizer_step_count": train_res["total_optimizer_steps"],
         "scheduler_step_count": train_res["total_optimizer_steps"],
@@ -639,6 +673,12 @@ def train_and_eval_group(
         "git_commit": preflight["git_sha"],
         "model_id": MODEL_ID,
         "model_revision": preflight["model_revision"],
+        "training_profile_id": train_cfg.training_profile_id,
+        "microbatch_size": train_cfg.per_device_train_batch_size,
+        "gradient_accumulation_steps": train_cfg.gradient_accumulation_steps,
+        "effective_batch_size": train_cfg.effective_batch_size,
+        "gradient_checkpointing": train_cfg.gradient_checkpointing,
+        "vision_cache_enabled": train_cfg.use_vision_cache,
         "start_time": t_start,
         "end_time": t_end,
         "artifacts": {
@@ -810,12 +850,22 @@ def print_final_table(summary: Dict[str, Any], training_stats: Dict[str, Dict[st
     print("=" * 75 + "\n")
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="SpatialForge G2.0-E3.2 Controlled Engineering Experiment Runner")
+    parser.add_argument(
+        "--profile",
+        choices=["reference", "balanced", "max_performance"],
+        default=DEFAULT_TRAINING_PROFILE,
+        help=f"Execution profile for training (default: {DEFAULT_TRAINING_PROFILE})",
+    )
+    args = parser.parse_args(argv)
+
     # 1. Preflight
-    preflight = run_preflight()
+    preflight = run_preflight(profile_id=args.profile)
 
     # 2. Config Freeze
-    frozen_configs = freeze_run_configs(preflight)
+    frozen_configs = freeze_run_configs(preflight, profile_id=args.profile)
 
     # 3. Baseline B
     res_b = run_baseline_b(preflight, frozen_configs)
@@ -825,7 +875,7 @@ def main() -> int:
     training_stats: Dict[str, Dict[str, Any]] = {}
 
     for grp in ("A", "C", "D"):
-        res = train_and_eval_group(grp, 42, preflight, frozen_configs)
+        res = train_and_eval_group(grp, 42, preflight, frozen_configs, profile_id=args.profile)
         all_results[grp] = res
         training_stats[grp] = res["train_metrics"]
 

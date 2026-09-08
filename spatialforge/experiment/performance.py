@@ -67,7 +67,10 @@ class NVMLClient:
                 "gpu_utilization_pct": 0.0,
                 "gpu_memory_used_mb": 0.0,
                 "gpu_memory_total_mb": 0.0,
+                "nvml_gpu_memory_used_mb": 0.0,
+                "nvml_gpu_memory_total_mb": 0.0,
                 "gpu_power_w": 0.0,
+                "sm_clock_mhz": 0.0,
             }
 
         with self._lock:
@@ -75,23 +78,35 @@ class NVMLClient:
                 util = _NVMLUtilization()
                 mem = _NVMLMemory()
                 power = c_uint()
+                clock = c_uint()
+                sm_clock = 0.0
 
                 self._lib.nvmlDeviceGetUtilizationRates(self._handle, byref(util))
                 self._lib.nvmlDeviceGetMemoryInfo(self._handle, byref(mem))
                 self._lib.nvmlDeviceGetPowerUsage(self._handle, byref(power))
+                if hasattr(self._lib, "nvmlDeviceGetClockInfo"):
+                    ret_clk = self._lib.nvmlDeviceGetClockInfo(self._handle, 1, byref(clock))
+                    if ret_clk == 0:
+                        sm_clock = float(clock.value)
 
                 return {
                     "gpu_utilization_pct": float(util.gpu),
                     "gpu_memory_used_mb": float(mem.used / (1024 * 1024)),
                     "gpu_memory_total_mb": float(mem.total / (1024 * 1024)),
+                    "nvml_gpu_memory_used_mb": float(mem.used / (1024 * 1024)),
+                    "nvml_gpu_memory_total_mb": float(mem.total / (1024 * 1024)),
                     "gpu_power_w": float(power.value / 1000.0),
+                    "sm_clock_mhz": sm_clock,
                 }
             except Exception:
                 return {
                     "gpu_utilization_pct": 0.0,
                     "gpu_memory_used_mb": 0.0,
                     "gpu_memory_total_mb": 0.0,
+                    "nvml_gpu_memory_used_mb": 0.0,
+                    "nvml_gpu_memory_total_mb": 0.0,
                     "gpu_power_w": 0.0,
+                    "sm_clock_mhz": 0.0,
                 }
 
     def close(self) -> None:
@@ -119,6 +134,7 @@ class GpuTelemetrySampler:
         self.util_samples: List[float] = []
         self.power_samples: List[float] = []
         self.mem_samples: List[float] = []
+        self.clock_samples: List[float] = []
         self.latest_stats: Dict[str, float] = self.nvml.query()
 
     def start(self) -> "GpuTelemetrySampler":
@@ -136,6 +152,7 @@ class GpuTelemetrySampler:
                 self.util_samples.append(stats["gpu_utilization_pct"])
                 self.power_samples.append(stats["gpu_power_w"])
                 self.mem_samples.append(stats["gpu_memory_used_mb"])
+                self.clock_samples.append(stats.get("sm_clock_mhz", 0.0))
             self._stop_event.wait(self.sample_interval_sec)
 
     def stop(self) -> Dict[str, Any]:
@@ -156,18 +173,21 @@ class GpuTelemetrySampler:
             utils = list(self.util_samples)
             powers = list(self.power_samples)
             mems = list(self.mem_samples)
+            clocks = list(self.clock_samples)
 
         def _stats(arr: List[float]) -> Dict[str, float]:
             if not arr:
-                return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
+                return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "min": 0.0, "max": 0.0}
             s = sorted(arr)
             n = len(s)
             p50_idx = int(0.50 * (n - 1))
             p95_idx = int(0.95 * (n - 1))
+            p99_idx = int(0.99 * (n - 1))
             return {
                 "avg": round(sum(s) / n, 2),
                 "p50": round(s[p50_idx], 2),
                 "p95": round(s[p95_idx], 2),
+                "p99": round(s[p99_idx], 2),
                 "min": round(s[0], 2),
                 "max": round(s[-1], 2),
             }
@@ -177,6 +197,8 @@ class GpuTelemetrySampler:
             "gpu_utilization": _stats(utils),
             "gpu_power_w": _stats(powers),
             "gpu_memory_mb": _stats(mems),
+            "nvml_gpu_memory_mb": _stats(mems),
+            "sm_clock_mhz": _stats(clocks),
         }
 
     def close(self) -> None:
@@ -262,20 +284,24 @@ class LiveTelemetryReporter:
 
         gpu_stats = self.sampler.get_latest() if self.sampler is not None else {}
         gpu_util = gpu_stats.get("gpu_utilization_pct", 0.0)
-        gpu_mem_used = gpu_stats.get("gpu_memory_used_mb", 0.0)
+        nvml_mem_used = gpu_stats.get("nvml_gpu_memory_used_mb", gpu_stats.get("gpu_memory_used_mb", 0.0))
+        nvml_mem_total = gpu_stats.get("nvml_gpu_memory_total_mb", gpu_stats.get("gpu_memory_total_mb", 0.0))
         gpu_power = gpu_stats.get("gpu_power_w", 0.0)
 
-        # PyTorch peak memory tracking if CUDA is available
+        # PyTorch memory tracking if CUDA is available
+        torch_allocated = 0.0
+        torch_reserved = 0.0
+        torch_peak_allocated = 0.0
+        torch_peak_reserved = 0.0
         try:
             import torch
             if torch.cuda.is_available():
-                gpu_mem_peak = float(torch.cuda.max_memory_allocated() / (1024 * 1024))
-                if gpu_mem_used <= 0.0:
-                    gpu_mem_used = float(torch.cuda.memory_allocated() / (1024 * 1024))
-            else:
-                gpu_mem_peak = gpu_mem_used
+                torch_allocated = float(torch.cuda.memory_allocated() / (1024 * 1024))
+                torch_reserved = float(torch.cuda.memory_reserved() / (1024 * 1024))
+                torch_peak_allocated = float(torch.cuda.max_memory_allocated() / (1024 * 1024))
+                torch_peak_reserved = float(torch.cuda.max_memory_reserved() / (1024 * 1024))
         except Exception:
-            gpu_mem_peak = gpu_mem_used
+            pass
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -297,8 +323,14 @@ class LiveTelemetryReporter:
             "elapsed_seconds": round(elapsed, 1),
             "eta_seconds": round(eta_sec, 1),
             "gpu_utilization_pct": round(gpu_util, 1),
-            "gpu_memory_used_mb": round(gpu_mem_used, 1),
-            "gpu_memory_peak_mb": round(gpu_mem_peak, 1),
+            "gpu_memory_used_mb": round(nvml_mem_used if nvml_mem_used > 0.0 else torch_allocated, 1),
+            "gpu_memory_peak_mb": round(torch_peak_allocated, 1),
+            "nvml_gpu_memory_used_mb": round(nvml_mem_used, 1),
+            "nvml_gpu_memory_total_mb": round(nvml_mem_total, 1),
+            "torch_memory_allocated_mb": round(torch_allocated, 1),
+            "torch_memory_reserved_mb": round(torch_reserved, 1),
+            "torch_peak_allocated_mb": round(torch_peak_allocated, 1),
+            "torch_peak_reserved_mb": round(torch_peak_reserved, 1),
             "gpu_power_w": round(gpu_power, 1),
             "updated_at": now_iso,
         }
@@ -322,7 +354,7 @@ class LiveTelemetryReporter:
             f"elapsed {metrics['elapsed_seconds']:.1f}s "
             f"ETA {metrics['eta_seconds']:.1f}s "
             f"GPU util {metrics['gpu_utilization_pct']:.0f}% "
-            f"VRAM {metrics['gpu_memory_used_mb']:.0f}MB / peak {metrics['gpu_memory_peak_mb']:.0f}MB "
+            f"NVML {metrics['nvml_gpu_memory_used_mb']:.0f}MB / Torch alloc {metrics['torch_memory_allocated_mb']:.0f}MB (peak {metrics['torch_peak_allocated_mb']:.0f}MB) "
             f"power {metrics['gpu_power_w']:.1f}W"
         )
         print(msg, flush=True)
