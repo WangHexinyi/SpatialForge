@@ -1,5 +1,18 @@
 """Structured procedural world generator for SpatialForge G2.1-C P1.
 
+STATUS: DEPRECATED AS TRAINING SOURCE (v3.1 architecture revision).
+This procedural toy world (scene_challenge_*, S0-S3, cube/sphere/cylinder/torus)
+is **no longer a training or product-environment source**. The formal training
+mainline is the Embodied ProcTHOR Agent (see ``spatialforge.embodied`` and
+docs/PROJECT_PLAN_v3.md).
+
+This module is retained ONLY as synthetic geometry fixtures for:
+- unit tests / deterministic regression
+- camera math / projection verification
+
+It must not be presented as a formal Environment in the active training/product
+UI, and must not be wrapped as training data.
+
 Pure CPU Python. No bpy import and no third-party dependencies.
 
 Scientific Boundaries:

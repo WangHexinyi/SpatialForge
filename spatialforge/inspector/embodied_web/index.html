@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SpatialForge — Embodied Inspector</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app">
+  <!-- ============ TOP GLOBAL BAR (minimal) ============ -->
+  <header id="topbar">
+    <div class="brand"><strong data-i18n="app.title">SpatialForge</strong></div>
+    <div class="chips">
+      <div class="chip"><span class="chip-k" data-i18n="top.env">环境</span><span id="chip-env" class="chip-v">—</span></div>
+      <div class="chip"><span class="chip-k" data-i18n="top.task">任务</span><span id="chip-task" class="chip-v">—</span></div>
+      <div class="chip"><span class="chip-k" data-i18n="top.agent">智能体状态</span><span id="chip-agent" class="chip-v">—</span></div>
+      <div class="chip"><span class="chip-k" data-i18n="top.lang">语言</span>
+        <select id="lang-select">
+          <option value="bilingual">中英双语</option>
+          <option value="zh-CN">中文</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- ============ CENTER: agent senses + research map ============ -->
+    <section id="center">
+      <div class="view-toggle">
+        <label><input type="checkbox" id="show-god" checked /> <span data-i18n="tab.debug">调试</span></label>
+        <span class="warn" data-i18n="privacy">特权真值 · 绝不作为模型输入</span>
+      </div>
+
+      <div class="views">
+        <div class="pane obs-pane">
+          <div class="pane-title" data-i18n="obs.firstperson">第一人称 RGB</div>
+          <canvas id="obs-canvas" width="256" height="256"></canvas>
+          <div class="meta" id="obs-meta">step — · horizon —°</div>
+          <div class="last-action" id="obs-last-action">—</div>
+          <div class="target-flag" id="obs-target-flag"></div>
+        </div>
+        <div class="pane god-pane" id="god-pane">
+          <div class="pane-title" data-i18n="tab.debug">调试 · God/Research Map</div>
+          <canvas id="god-canvas" width="320" height="320"></canvas>
+          <div class="meta" id="god-meta">—</div>
+        </div>
+      </div>
+
+      <!-- ============ ACTION CONTROLS (control hierarchy on Agent senses) ============ -->
+      <div class="agent-console">
+        <div class="row">
+          <label data-i18n="task.category">目标类别</label>
+          <input id="target-input" list="categories" value="mug" />
+          <datalist id="categories">
+            <option value="mug"></option><option value="couch"></option>
+            <option value="chair"></option><option value="lamp"></option>
+            <option value="plant"></option><option value="bowl"></option>
+          </datalist>
+          <button id="btn-start" data-i18n="common.start">开始回合</button>
+          <button id="btn-teacher" data-i18n="common.teacher">生成教师路径</button>
+        </div>
+        <div class="row actions">
+          <button class="act" data-act="LookUp">▲ 仰视</button>
+          <button class="act" data-act="RotateLeft">◀ 左转</button>
+          <button class="act big" data-act="MoveAhead">↑ 前进</button>
+          <button class="act" data-act="RotateRight">右转 ▶</button>
+          <button class="act" data-act="LookDown">俯视 ▼</button>
+        </div>
+        <div class="row actions sub">
+          <button class="act" data-act="Crouch">蹲</button>
+          <button class="act" data-act="Stand">站</button>
+          <button class="act" data-act="MoveBack">后</button>
+          <button class="act" data-act="MoveLeft">左移</button>
+          <button class="act" data-act="MoveRight">右移</button>
+          <button class="act done" data-act="Done">Done 完成</button>
+        </div>
+        <div class="statusline" id="episode-status">—</div>
+      </div>
+    </section>
+
+    <!-- ============ RIGHT SIDEBAR (all main controls) ============ -->
+    <aside id="sidebar">
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="observation" data-i18n="tab.observation">观察</button>
+        <button class="tab" data-tab="agent" data-i18n="tab.agent">智能体</button>
+        <button class="tab" data-tab="task" data-i18n="tab.task">任务</button>
+        <button class="tab" data-tab="environment" data-i18n="tab.environment">环境</button>
+        <button class="tab" data-tab="training" data-i18n="tab.training">训练</button>
+        <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
+        <button class="tab" data-tab="episodes" data-i18n="tab.episodes">回合回放</button>
+        <button class="tab" data-tab="settings" data-i18n="tab.settings">设置</button>
+      </nav>
+
+      <!-- Observation -->
+      <div class="panel active" id="panel-observation">
+        <h3 data-i18n="tab.observation">观察</h3>
+        <dl>
+          <dt data-i18n="obs.firstperson">第一人称 RGB</dt><dd id="v-obs-frame">—</dd>
+          <dt data-i18n="obs.step">步数 / 时间戳</dt><dd id="v-obs-step">—</dd>
+          <dt data-i18n="obs.horizon">Camera 俯仰</dt><dd id="v-obs-horizon">—</dd>
+          <dt data-i18n="obs.last_action">上一步动作</dt><dd id="v-obs-action">—</dd>
+          <dt data-i18n="obs.history">历史</dt><dd id="v-obs-history">—</dd>
+        </dl>
+        <div class="permitted-box">Model input (permitted only) · <a href="#" id="btn-view-modelinput">view JSON</a></div>
+      </div>
+
+      <!-- Agent -->
+      <div class="panel" id="panel-agent">
+        <h3 data-i18n="tab.agent">智能体</h3>
+        <dl>
+          <dt data-i18n="agent.pose">位姿</dt><dd id="v-agent-pose">—</dd>
+          <dt>Yaw / Horizon</dt><dd id="v-agent-yaw">—</dd>
+          <dt data-i18n="agent.stance">站/蹲</dt><dd id="v-agent-stance">—</dd>
+          <dt>步数</dt><dd id="v-agent-step">—</dd>
+          <dt>上一步动作成功</dt><dd id="v-agent-last">—</dd>
+          <dt>碰撞 / 阻挡</dt><dd id="v-agent-coll">—</dd>
+          <dt data-i18n="agent.room">房间</dt><dd id="v-agent-room">—</dd>
+        </dl>
+        <div class="note" data-i18n="agent.pose.long"></div>
+      </div>
+
+      <!-- Task -->
+      <div class="panel" id="panel-task">
+        <h3 data-i18n="tab.task">任务</h3>
+        <dl>
+          <dt data-i18n="task.goal">目标</dt><dd id="v-task-instruction">—</dd>
+          <dt data-i18n="task.category">目标类别</dt><dd id="v-task-cat">—</dd>
+          <dt data-i18n="task.episode">回合状态</dt><dd id="v-task-episode">—</dd>
+          <dt>当前步 / 预算</dt><dd id="v-task-step">—</dd>
+          <dt>成功 / 失败</dt><dd id="v-task-success">—</dd>
+        </dl>
+      </div>
+
+      <!-- Environment -->
+      <div class="panel" id="panel-environment">
+        <h3 data-i18n="tab.environment">环境</h3>
+        <dl>
+          <dt data-i18n="env.house">房屋 ID</dt><dd id="v-env-house">—</dd>
+          <dt data-i18n="env.split">数据划分</dt><dd id="v-env-split">—</dd>
+          <dt data-i18n="env.rooms">房间数</dt><dd id="v-env-rooms">—</dd>
+          <dt>物体类别概要</dt><dd id="v-env-cats">—</dd>
+          <dt data-i18n="env.backend">渲染后端</dt><dd id="v-env-backend">—</dd>
+        </dl>
+        <label class="row">
+          后端
+          <select id="backend-select">
+            <option value="deterministic">deterministic (CPU harness)</option>
+            <option value="procthor">ProcTHOR / AI2-THOR</option>
+          </select>
+        </label>
+      </div>
+
+      <!-- Training -->
+      <div class="panel" id="panel-training">
+        <h3 data-i18n="tab.training">训练</h3>
+        <dl>
+          <dt>model id</dt><dd id="v-train-model">(not started)</dd>
+          <dt>rollout source</dt><dd id="v-train-source">(none)</dd>
+          <dt>episode count</dt><dd id="v-train-count">0</dd>
+          <dt>profile</dt><dd id="v-train-profile">behavior-cloning (planned)</dd>
+        </dl>
+        <div class="note" data-i18n="note.training"></div>
+      </div>
+
+      <!-- Debug -->
+      <div class="panel" id="panel-debug">
+        <h3 data-i18n="tab.debug">调试</h3>
+        <div class="warn strong" data-i18n="debug.warn">PRIVILEGED DEBUG DATA · NEVER MODEL INPUT</div>
+        <dl>
+          <dt>target object id</dt><dd id="v-dbg-target-id">—</dd>
+          <dt>target position</dt><dd id="v-dbg-target-pos">—</dd>
+          <dt>agent pose</dt><dd id="v-dbg-pose">—</dd>
+          <dt>teacher path</dt><dd id="v-dbg-teacher">—</dd>
+        </dl>
+        <pre id="v-dbg-json" class="json"></pre>
+      </div>
+
+      <!-- Episodes (teacher / model rollout replay, researcher-only) -->
+      <div class="panel" id="panel-episodes">
+        <h3 data-i18n="tab.episodes">回合回放</h3>
+        <div class="warn strong" data-i18n="ep.researcher">Researcher-only · privileged truth · never model input</div>
+        <button id="btn-ep-list" data-i18n="ep.list">刷新回合列表</button>
+        <select id="ep-select"></select>
+        <button id="btn-ep-load">Load</button>
+        <label class="row small"><input type="checkbox" id="ep-live" /> LIVE 2s poll (model episodes in progress)</label>
+        <div id="ep-header" class="note"></div>
+        <div id="ep-split">
+          <div id="ep-timeline"></div>
+          <div id="ep-detail">
+            <canvas id="ep-canvas" width="200" height="200"></canvas>
+            <dl id="ep-fields"></dl>
+          </div>
+        </div>
+        <div id="ep-decisions" class="note"></div>
+      </div>
+
+      <!-- Settings -->
+      <div class="panel" id="panel-settings">
+        <h3 data-i18n="tab.settings">设置</h3>
+        <label class="row"><span data-i18n="top.lang">语言</span><select id="settings-lang">
+          <option value="bilingual">中英双语</option><option value="zh-CN">中文</option><option value="en">English</option>
+        </select></label>
+        <label class="row"><span>render resolution</span><select id="set-res">
+          <option>96</option><option selected>256</option><option>512</option></select></label>
+        <label class="row"><span>movement step</span><input id="set-move" type="number" value="1" step="1" /></label>
+        <label class="row"><span>rotation step</span><input id="set-rot" type="number" value="90" step="1" /></label>
+        <label class="row"><span>look step</span><input id="set-look" type="number" value="30" step="1" /></label>
+        <label class="row"><span>max episode length</span><input id="set-maxsteps" type="number" value="300" step="10" /></label>
+      </div>
+    </aside>
+  </div>
+
+  <pre id="model-json-modal" class="json hidden"></pre>
+</div>
+<script src="app.js" type="module"></script>
+</body>
+</html>

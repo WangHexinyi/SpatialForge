@@ -9,6 +9,49 @@
 
 ---
 
+> ## ★ 2026-09-09 ARCHITECTURE REVISION (v3.1 → Embodied ProcTHOR Mainline)
+>
+> **Human UAT 判定**：既有 procedural scene 是 toy-level training env；camera-centric / orbital
+> trajectory 路线不是最终训练范式；既有 Inspector 前端存在交互 bug。正式训练主线换轨为：
+>
+> ```
+> ProcTHOR / AI2-THOR
+>   → Embodied First-person Agent
+>   → AgentAction → Environment Transition → New Observation
+>   → Memory / Episode History
+>   → Object Search (Find <category>)
+>   → Teacher / Behavior Cloning (privileged)
+>   → World Representation / Active Observation
+>   → Interactive Object Search
+> ```
+>
+> **AGENT 是主体；Camera 是 Agent 的眼睛；God View 是 researcher/teacher/verifier。**
+> 固定镜头 / Canonical 6/14/26 / Trajectory Lab 仅保留用于 calibration、debug、
+> visualization、research inspection，**不再作为正式训练主范式**。
+>
+> ### Deprecation 记录（本轮更新）
+> - **Procedural Toy World**（`challenge.py` scene_challenge_* / S0–S3 /
+>   cube/sphere/cylinder/torus）：`DEPRECATED AS TRAINING SOURCE`。保留极少量
+>   synthetic geometry fixture 仅用于 unit tests / camera math / projection
+>   regression（这些 fixture 不属于训练数据）。
+> - **Static / Orbital Camera Training**：`DEPRECATED AS PRIMARY TRAINING METHOD`；
+>   保留为 research/calibration/debug infrastructure（历史 gate 证据保留，见 §8–§9）。
+> - **God View / Research Inspector**：重新定位为 research infrastructure。
+> - **旧 G2.1 Dynamic Viewpoint & Scene Challenge**：不再作为训练主任务承接对象，
+>   其轨迹 / camera 研究保留于 research 层。
+>
+> ### 本轮交付（wip branch，未经 Git 提交）
+> 1. `spatialforge/embodied/` 具身运行时：数据契约、动作空间、model-input 泄漏防护、
+>    teacher 最短路、确定性 CPU harness 后端、真实 ProcTHOR/AI2-THOR 后端。
+> 2. i18n 层（zh-CN / en / bilingual），Inspector 新 UI：顶部极简全局栏 + 右侧 7-tab Sidebar
+>    （Observation / Agent / Task / Environment / Training / Debug / Settings）。
+> 3. 新 Inspector server `embodied_server.py` + 双语前端 `embodied_web/`。
+> 4. 旧 toy 世界从正式训练/产品 Environment 流程移出（training 主入口不再挂 challenge map）。
+>
+> 详细报告与运行状态见 §28 末尾 "Embodied Vertical Slice Record（2026-09-09）"。
+
+---
+
 # 0. 新会话 / 新 AI 快速拉起
 
 **CURRENT / VALIDATED**：当前实现是受控静态多视角空间推理实验基础设施；长期定位是 **Spatial Intelligence Research Infrastructure（空间智能研究基础设施）**。具身 Agent、动态 world model、通用后端与分布式训练尚未实现。
@@ -2046,3 +2089,259 @@ Interactive Object Search
 > 允许修改，不需要为了“保持旧计划正确”而硬撑。
 
 但已经完成的 commit / 实验事实必须保留历史记录，不能事后改写。
+
+---
+
+# 32. Embodied Vertical Slice Record（2026-09-09）
+
+> 本轮交付对应文件全部属于 **未提交工作树**（用户控制最终 Git 操作）。以下记录
+> 仅描述实现事实；完整逐项报告见交付说明（Final Report）。
+
+## 32.1 依赖 pin（本轮新增，仅 Embodied 主线）
+| package | version | reason |
+|---|---|---|
+| `ai2thor` | `5.0.0` | 官方 AI2-THOR 控制器；当前 ProcTHOR-10K 需 ai2thor 5.0+；需 Python ≤ 3.11（独立 Python 3.10 venv） |
+| `prior` | `1.0.3` | 官方 AllenAI ProcTHOR-10K 数据集加载器 |
+| `procthor` | `0.0.1.dev2` | 官方 ProcTHOR house / asset metadata（generation，备用） |
+| `numpy`/`Pillow`/`opencv-python-headless`/`flask`/`msgpack` 等 | 见 venv | embodied runtime / ai2thor 运行期依赖（用 headless opencv 避免 73MB 全量版） |
+| AI2-THOR Unity Linux build | ai2thor 自动下载（约 769MB） | headless Linux 渲染与 physics；Xvfb (`:99`, GL 4.5 llvmpipe) |
+| 网络代理 | `http://127.0.0.1:17898` | Windows Clash 反向代理（仅下载期使用，未写入仓库） |
+未自行下载来路不明的资产包；兼容版本显式 pin，不静默赌最新。
+
+## 32.4 运行事实（本环境）— Real ProcTHOR Runtime: VALIDATED / PASS
+- **全量 CPU suite**：`pytest -q` → **356 passed + 21 subtests passed**（新增
+  `test_procthor_backend.py` 5 例；含既有 camera/projection/trajectory/embodied/i18n/server）。
+- **真实 ProcTHOR-10K runtime（真实 Unity）→ PASS**：
+  - 官方数据：`prior`/`allenai/procthor-10k` `val.jsonl.gz`（git-lfs，5,094,681 B），取 house index 0。
+  - 数据：`ai2thor==5.0.0` Controller(`scene="Procedural"`) → `CreateHouse(house)` 成功
+    （`lastActionSuccess=True`，场景实例化 236 objects，house rooms=7）。
+  - `TeleportFull` 到官方 agent pose → 真实 first-person RGB `(256,256,3)`。
+  - 初始 agent：position `(11.5, 0.901, 6.5)`，yaw `90`，cameraHorizon `30`。
+  - `MoveAhead`：position `(11.5→11.75)`，`lastActionSuccess=True`，RGB md5 改变。
+  - `RotateLeft`：yaw `90→0`，RGB 改变。`LookDown`：horizon `30→60`，RGB 改变。
+  - 证据 PNG：`outputs/smoke/procthor/{00_reset_firstperson,01_after_move,02_after_rotate,03_after_look,backend_reset,backend_after_rotate}.png`（gitignored，未提交）。
+- **SpatialForge `ProcTHORBackend` 真实接入 → PASS**：
+  - `EmbodiedEnvironment` 包装真实 event → `AgentObservation`/`AgentState`/`AgentAction`。
+  - model-input 泄漏检查：**CLEAN**（不含 target_positions / reachable / teacher_path / position / segmentation）。
+  - 真实 target（privileged/debug 可见）：`mug` → `['Mug|surface|6|56','Mug|surface|7|71']`（来自真实 Thor metadata）。
+  - Done verifier：目标不可见 → `success=False`（行为正确，基于引擎 authoritative `visible`）。
+
+## 32.5 Known limitations
+- Inspector 主训练 tab 为执行配置 UI（此轮未做大规模训练）。
+- ProcTHOR-10K val house index 0 为本次真实验证载体；headless 渲染为 Xvfb software GL
+  （llvmpipe），单帧偏慢，仅用于 smoke / 少量 step。
+- Debug/God map 为 researcher 顶层投影表示，非像素级遮挡真值。
+
+
+## 32.2 新增模块
+- `spatialforge/embodied/`（主训练运行时）
+  - `contracts.py` — AgentObservation / AgentAction / AgentState / EpisodeState /
+    ObjectSearchTask / EpisodeHistory / HouseInfo（agent 可见 vs researcher/debug 分层）
+  - `actions.py`(常量并入 contracts) / `model_input.py`（严格 allowlist + 泄漏防护）
+  - `environment.py`（EmbodiedEnvironment 闭环 + Done verifier + 单主泄漏边界）
+  - `teacher.py`（GridTeacher 最短路径，privileged）
+  - `backends/deterministic.py`（CPU 测试 harness，**非训练源**）
+  - `backends/procthor.py`（真实 AI2-THOR/ProcTHOR 后端）
+  - `i18n.py`（zh-CN / en / bilingual 统一字典）
+- `spatialforge/inspector/embodied_session.py`、`embodied_server.py`、`embodied_web/`
+  （index.html / styles.css / app.js）
+- `scripts/run_embodied_smoke.py`
+- tests：`test_embodied_contracts.py`、`test_i18n.py`、`test_embodied_transition.py`、
+  `test_embodied_teacher.py`、`test_embodied_server.py`、`test_procthor_backend.py`
+
+## 32.3 数据隔离（严格）
+`model_input` 只允许：RGB、goal/instruction、camera horizon、permitted action/observation
+history。禁止进入模型输入：target_object_ids / target_positions / reachable /
+teacher_path / world position / segmentation / God View / scene graph。
+泄漏防护以 allowlist + forbidden 语义双保险，并有单元测试覆盖。
+
+## 32.4 运行事实（本环境）
+- **全量 CPU suite**：`pytest -q` → **351 passed + 21 subtests passed**（含既有稳定
+  camera/projection/trajectory/test 与新 embodied/i18n/server 测试）。
+- **确定性纵切 smoke**（CPU，无 Unity）→ PASS：house load → episode → MoveAhead/Rotate
+  真实改变 first-person RGB 与 agent state → teacher 最短路 → replay → Done → verifier success。
+- **真实 ProcTHOR runtime**：**外部 blocker，未能在此会话完成**。
+  依据：本 AutoDL 镜像 pip 源实测 ~165 KB/s；`ai2thor==4.3.0` 依赖（含 73.8 MB
+  opencv-python）在多分钟内未能完成下载，ai2thor 未装入 Python 3.10 venv；AI2-THOR
+  Unity build（>1 GB）与 ProcTHOR-10K 资产同源网络下载在可用带宽下不可行。真实后端代码、
+  清晰 blocker 上报（`--procthor`）均已提供，未以 mock 顶替该 smoke。
+
+## 32.5 Known limitations
+- Inspector 主训练 tab 为执行配置 UI（此轮未做大规模训练）。
+- 真实 ProcTHOR Unity 运行待网络/环境就绪后在 Python 3.10 venv 内用
+  `AI2THOR_EXECUTABLE_PATH` 指向 ProcTHOR-capable build 验证。
+- Debug/God map 为 researcher 顶层投影表示，非像素级遮挡真值。
+
+---
+
+# 33. REAL ProcTHOR Object Search Teacher Rollout（2026-09-10）
+
+> 承接 §32 vertical slice；本记录属于未提交工作树（用户控制 Git）。真实 runtime 证据全部在本环境复现（非 replay / 非 mock）。
+
+## 33.1 交付
+- **真实 Teacher**（`spatialforge/embodied/procthor_teacher.py`）：真实驱动 AI2-THOR
+  `Observation_t -> AgentAction -> controller.step() -> Observation_{t+1}`，无预生成 playback。
+  用权威 `GetReachablePositions`(0.25m grid) 建导航图 + BFS；privileged `TeleportFull` 预览选
+  **suitable visible observation pose**（`visible` engine metadata）；navigate 到达后只在对齐
+  heading/camera 且 authoritative `target visible` 成立时才 `Done`。成功与否由 verifier 判定，
+  Teacher 不自宣成功。
+- **Episode Generation**（`rollout.py` + `records.py`）：house/目标类别/可到达 spawn 采样、
+  initial-visible 重采样、`max_steps`/timeout/失败处理、terminal 状态。两个逻辑数据域严格分离：
+  `student_training_record`（仅 RGB 引用/goal/permitted history/teacher next action，重新过递归泄漏闸）
+  vs `privileged_research_record`（world pose/target id+pos/reachable/teacher plan/authoritative
+  visibility/executed trajectory）。model_input strict allowlist 未放宽。
+- **后端**：`backends/procthor.py` 增加 `_fetch_reachable`（GetReachablePositions）与 privileged
+  `set_agent_pose`（非 student action）。
+- **Inspector Episode Inspection**（`embodied_session/server/web`）：新增 Episodes tab —
+  列已存 teacher 回合、加载 timeline、点击 step 显示该步帧 + pose/action/visible/target(priv)/
+  terminal，researcher-only 标识；`/api/episodes/{list,load}`、`/api/episodes/state`、
+  `/api/episodes/frame`。
+- 修复 `EmbodiedEnvironment._handle_done` 未更新 `last_raw_action`（Done transition 的 action
+  恒为上一动作）的 bug。
+
+## 33.2 真实运行证据（Xvfb :99, GL llvmpipe, ai2thor 5.0.0, val_house_0）
+```
+[case] mug        success steps=6  spawn_visible=False resample=1  Done while target visible
+[case] winebottle success steps=30 spawn_visible=False resample=1  (30-step real nav, non-Mug)
+[case] mug(demo)  success steps=7  spawn_visible=False resample=2  (initial-visible resample)
+[case] teddybear  failure steps=5  step budget exhausted before Done (timeout)
+[case] nonexistent failure steps=0  category has no real instances (invalid)
+[case] apple      failure steps=0  no reachable/observable view pose (unreachable)
+```
+- 每步为真实 `controller.step()`；success 回合末段 `authoritative_target_visible` 由 0→1 后才
+  `Done`，verifier 判定 success=True。
+- Student Training Record 6/6 `_leak_checked=clean`，JSON 全串扫描不含
+  position/target_object_ids/reachable/teacher_path/world_position/segmentation/god_view。
+- Inspector 成功 HTTP 加载真实回合（timeline 含 context+Done，末步 Done/visible/terminal=True，
+  PNG frame 正常返回）。
+
+## 33.3 全量 CPU suite
+`pytest -q` → **368 passed + 21 subtests passed**（新增 records / nav / episode-inspection 测试；
+既有 server 测试需在本环境以 `NO_PROXY=127.0.0.1,localhost` 运行以绕过 shell 级 http_proxy）。
+
+---
+
+# 34. GPU-backed ProcTHOR rollout runtime（2026-09-10）
+
+> 承接 §33。将 headless llvmpipe blocker 关闭：AI2-THOR 真实渲染改走 NVIDIA GPU。
+
+## 34.1 ROOT CAUSE（llvmpipe）
+- `ai2thor 5.0.0` 的 Linux64 build 经 **X 的 GLX** 渲染（`launch_env` 只设 `DISPLAY`）。
+- 此前用 `Xvfb :99` —— Xvfb 是纯软件 X server，不与 NVIDIA 通信 → Mesa GLX 只能回退
+  **llvmpipe** 软件渲染。`nvidia-smi`：util 0% / VRAM ~1 MiB / thor 进程高 CPU。
+- 结论：不是缺少 GPU lib，而是**缺一个由 NVIDIA driver 承载 GLX 的 X display**。
+
+## 34.2 采用路径（官方、可复现）
+`Xorg(nvidia 驱动) + 虚拟 framebuffer` 的虚拟 X display，再让 Unity 用该 DISPLAY 渲染。
+官方提示即 `ai2thor-xorg`；但它在多 GPU 宿主上会枚举所有 PCI NVIDIA（含不可访问），故改为
+**只针对 `nvidia-smi` 可见 GPU**：
+- 需要先 `apt install xserver-xorg-core pciutils`（本实例缺 `Xorg`）。
+- `scripts/start_nvidia_xorg.py start --display :0`：从 `nvidia-smi` 解析真实 BusID，
+  生成仅含该 GPU 的 xorg.conf（`AllowEmptyInitialConfiguration/Interactive False`），
+  后台启动 Xorg，轮询 `glxinfo` 直到渲染器为 NVIDIA；失败则退出非 0（**NO SILENT FALLBACK**）。
+- `scripts/bench_gpu_thor.py`：同一 house/workload 的软件 vs GPU 可重复对比。
+- `--require-nvidia`（`ProcTHORBackend(require_nvidia=True)` / `ProcthorEpisodeGenerator(...)`）：
+  加载 house 前校验 DISPLAY 渲染器为 NVIDIA，否则 `ProcTHORError` 明确失败。
+
+## 34.3 硬件证据
+- renderer：`NVIDIA GeForce RTX 4080 SUPER`（OpenGL 4.6.0 NVIDIA 595.58.03，direct=Yes）。
+- nvidia-smi 采样：VRAM 23 → **384 MiB**；rollout 期 peak GPU util **~57–60%**；power 上浮。
+  thor-Linux64 / Unity 渲染负载真实命中 NVIDIA GPU（非仅"不显示 llvmpipe"）。
+
+## 34.4 性能 before / after（同一 val_house_0 / 同一脚本）
+| 指标 | Software (Xvfb llvmpipe) | GPU (NVIDIA :0) |
+|---|---|---|
+| renderer | llvmpipe | RTX 4080 SUPER |
+| house load | ~14.2 s | ~11.7 s |
+| mean step (256²) | ~646 ms | ~328 ms |
+| steps/sec (256²) | ~1.55 | ~3.07 |
+| mean step (512²) | ~714 ms | ~531 ms |
+| VRAM / util | 23 MiB / 0% | ~325–384 MiB / ~60% |
+
+单步约 **~2x（256²）/ ~1.3x（512²）** wall-clock 加速；低分辨率下 Unity CPU/IO 开销占比高，
+硬件收益主要体现在 util/VRAM 与可扩展性（更高分辨率/并行）。已测量速度提升真实存在。
+
+## 34.5 正确性复验（GPU）
+真实 ProcTHOR house → CreateHouse → TeleportFull → GetReachablePositions(1083) →
+真实 first-person RGB（每动作 rgb 改变）→ MoveAhead/RotateLeft/RotateRight/LookDown →
+authoritative visibility → Done verifier；Teacher Object Search episode（mug）success，
+最终 target visible=True，verifier 判定 success=True，7 步。student record `_leak_checked` 不变，
+world pose/target id 只在 privileged record。语义/契约/隔离/成功定义未改。
+
+## 34.6 全量 CPU suite
+`pytest -q` → **368 passed + 21 subtests passed**（历史 baseline 未破坏）。
+
+---
+
+# 35. Embodied BC Vertical Slice（2026-09-10）— REAL Qwen-controlled Object Search
+
+> 承接 §33/§34。本 Gate：Real ProcTHOR teacher BC dataset → Qwen2.5-VL-3B LoRA BC
+> fine-tune → offline action eval → **真实模型闭环** → God View 实时观察。全部为未提交
+> 工作树（用户控制 Git）。本记录不抹除/不贬低历史 controlled baseline；G2.0-* 与
+> Teacher/Inspector/NVIDIA runtime Gate 保持历史事实。
+
+## 35.1 Maximum Useful Throughput policy（本次起执行）
+- 优化目标 = MAX(有效 wall-clock 产出)：environment steps / episodes / samples /
+  optimizer updates / model-controlled episodes，不是 MAX(GPU utilization %)。
+- worker 数选择以 aggregate useful throughput 平台/下降为停止条件；GPU 高 util 但不是
+  唯一目标（见 35.4 sweep 表：w6=8.33 steps/s 峰值；GPU avg util 仅 ~7.6%，
+  bottleneck 为 Unity 每步 CPU/IO 与 privileged 规划渲染，非 GPU 像素吞吐）。
+
+## 35.2 数据与隔离
+- 官方 ProcTHOR-10K **val.jsonl.gz**（HF allenai/procthor-10k 现 gated/401、AWS S3 403，
+  无法获取官方 train split）→ 改用官方 val houses 严格 **house-level disjoint split**：
+  train=40 houses / val=3 houses（house_0005..house_0044 等 vs val_house_0/1/2），
+  provenance 显式记录；train/val 无 house 交集。
+- renderer=NVIDIA GLX(Xorg :0) quality Low；resolution 256×256；Teacher=§33 真实
+  ThorObjectSearchTeacher；action vocabulary=8（MoveAhead/RotateLeft/RotateRight/
+  LookUp/LookDown/Crouch/Stand/Done，未扩 interaction）。
+- Student record schema 不变（`student_training_record.v1`）：
+  - 新增 `Done` target 语义过滤：teacher 偶发在 step-budget 边缘发出“Done 但目标不可见”
+    （verifier 判 false）；此类行的 Done target 不进入 BC 数据（防止教坏 Done 语义），
+    其余 teacher truth 未改动、未伪造 action。
+  - model-input strict allowlist / recursive forbidden-term 保持；FORBIDDEN_TERMS 增补
+    plain-English 短语（target position / object id / world position / coordinates 等）。
+- dataset：train **6400** rows / 123 episodes / 35 houses（house-stratified cap）；
+  val **1500** rows / 36 episodes / 3 houses。leakage scan = **0**。
+
+## 35.3 BC 训练（新 objective，非历史 static-QA 对照）
+- 模型 Qwen/Qwen2.5-VL-3B-Instruct（bf16，本地 /root/autodl-tmp/models/…）。
+- LoRA r=8 alpha=16 dropout=0.05，语言侧 252 modules / 14,966,784 params，vision frozen。
+- profile：historical `max_performance` MB4×ACC2（effective 8）作为起点实跑；
+  Frozen Vision Feature Cache 在本任务**合法复用**（cache key=图像内容 hash；
+  Qwen2.5-VL vision tower 输出与文本无关；单帧 per-sample 契约不变；无 stale 复用）。
+- 6400 samples / 800 optimizer steps / wall 约 19-20 min（含 ~9 min 串行 cache prep）
+  / samples/sec 波动 3.7→6.2（cache prep 段低；训练段 GPU ~84-85%）。
+
+## 35.4 实测数据与结论（真实 NVIDIA GPU）
+- **concurrency sweep**（12 fixed jobs×256²，n=1,2,4,6,8，全程 0 crash）：
+  n=1 0.43 steps/s（受 pathological 规划负载+watchdog 约束）→ n=2 2.50 → n=4 5.79 →
+  **n=6 8.33 steps/s（选型）** → n=8 8.02（平台）。GPU util avg 0.3%→7.6%；
+  VRAM avg ~1.0→3.1 GB；CPU avg 5-12%（Unity 单步 CPU/IO 为主瓶颈）。
+- **dataset generation**（w6 实跑）：train 89+11+40 jobs ≈ 30 min；val 12+24 jobs ≈ 4 min；
+  val GPU util avg ~9.9%、p95 51%、VRAM avg 2.5-5.2 GB。
+- **closed-loop**：9/9 model-controlled 真实 episodes（val_house_0/1/2，不在训练集），
+  720 env steps，0 crash，0 invalid，**success=0**（全部 80-step budget exhausted，
+  模型从不输出 Done、几乎只 MoveAhead（719/720）→ 与离线 eval 一致：类不均衡导致
+  Done 学习信号过弱；无 false-Done；诚实报告，不改数据/不放宽）。
+- decision latency 实测量级：单次 inference ~0.5-1.0 s 级（服务器端 greedy decode +
+  ViT）；含 env step 的闭环步骤 ~1.5-2.5 s。
+
+## 35.5 God View（Live Embodied Inspector，researcher-only）
+- episodes_root 指向 model_rollout 目录；Episodes tab 列出 model-controlled 回合
+  （header：model_controlled / terminal_reason / decision/invalid counts），REPLAY
+  timeline（frames+pose+visible+Done+terminal，privileged），decisions 表
+  （raw output / parsed action / executed / invalid / latency / frame ref）。
+- **LIVE**：episode 运行中原子写 `live_state.json`+逐帧 PNG；list/load 返回
+  in_progress payload（当前 step、model action、raw、latency、visible、live frame）；
+  前端 2s 轮询。实测轮询 3 次 step 17→23→30→36 增长。全程 read-only、非阻塞、
+  不触碰模型输入（student 侧隔离契约未变）。
+
+## 35.6 工程事实 / 已知问题
+- ai2thor 每次 CreateHouse 的对象实例集**存在逐次变动**（同 house 文件不同 load 出现
+  不同 mug/pen 实例），导致 privileged 规划（view-pose/spawn teleport renders）
+  耗时剧烈波动（病理 episode 可 >600 s）→ 引入：worker per-job watchdog（monotonic
+  clock，免疫 NTP 跳变）、instance 规划 probe cap、setup timeout（150 s）与确定性
+  失败上报；这些是吞吐工程，不改变 verifier/teacher truth/student 语义。
+- 本机 http_proxy 会劫持 urllib 到 127.0.0.1 → localhost 流量显式 ProxyHandler({})。
+- 403 passed + 21 subtests（CPU 全量，NO_PROXY=127.0.0.1,localhost）。

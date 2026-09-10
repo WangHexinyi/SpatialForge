@@ -1,5 +1,9 @@
 """Export controllable prototype challenge scenes for SpatialForge G2.1-C P0.
 
+STATUS: DEPRECATED AS TRAINING SOURCE. This exporter writes procedural toy-world
+fixtures that are NOT used as formal training data (see docs/PROJECT_PLAN_v3.md).
+It is retained only for deterministic geometry/regression fixtures.
+
 Usage:
     python scripts/generate_challenge_scenes.py --tier S2 --count 5
     python scripts/generate_challenge_scenes.py --export-reference-suite
