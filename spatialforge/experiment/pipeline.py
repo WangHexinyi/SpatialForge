@@ -34,7 +34,7 @@ from spatialforge.experiment.training import (
 )
 
 DEFAULT_CACHE_DIR = Path("outputs/cache/prepared_samples")
-PIPELINE_SCHEMA_VERSION = "g2.0-e3-v1"
+PIPELINE_SCHEMA_VERSION = "g2.0-e3-v2"
 
 
 # =====================================================================
@@ -78,7 +78,7 @@ def compute_pipeline_cache_key(
         "dataset_name": fname,
         "dataset_sha256": dataset_hash,
         "model_revision": model_rev,
-        "processor_type": "Qwen2.5-VL-3B-Instruct",
+        "model_path": str(model_path),
     }
     key_str = json.dumps(key_payload, sort_keys=True)
     return hashlib.sha256(key_str.encode("utf-8")).hexdigest()
@@ -115,7 +115,7 @@ def compute_vision_cache_key(
         "image_name": p.name,
         "image_sha256": img_hash,
         "model_revision": model_rev,
-        "processor_type": "Qwen2.5-VL-3B-Instruct",
+        "model_path": str(model_path),
         "dtype": dtype,
     }
     key_str = json.dumps(key_payload, sort_keys=True)
@@ -126,6 +126,7 @@ def compute_batched_per_example_loss(
     logits: torch.Tensor,
     labels: torch.Tensor,
     ignore_index: int = -100,
+    sample_weights: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute per-example mean cross-entropy loss mathematically equivalent to MB1.
 
@@ -133,14 +134,18 @@ def compute_batched_per_example_loss(
     the exact per-sample optimizer objective regardless of unequal answer lengths
     or padding tokens.
 
+    ``sample_weights`` (optional, [B]) applies per-sample class weighting for
+    imbalance control; the batch loss is the weighted mean sum(w_i L_i)/sum(w_i).
+
     Args:
         logits: [B, S, V] unscaled logits from language model.
         labels: [B, S] target token ids with ignore_index for prompt & padding.
         ignore_index: int, default -100.
+        sample_weights: optional [B] non-negative per-sample weights.
 
     Returns:
         per_sample_losses: [B] tensor of per-sample mean losses.
-        batched_mean_loss: scalar tensor equal to mean(per_sample_losses).
+        batched_mean_loss: scalar weighted mean loss.
     """
     import torch.nn.functional as F
 
@@ -159,7 +164,11 @@ def compute_batched_per_example_loss(
     mask = (shift_labels != ignore_index).float()
     n_tokens = mask.sum(dim=1).clamp(min=1.0)
     per_sample_losses = (loss_matrix * mask).sum(dim=1) / n_tokens
-    batched_mean_loss = per_sample_losses.mean()
+    if sample_weights is not None:
+        w = sample_weights.to(per_sample_losses.device, dtype=per_sample_losses.dtype)
+        batched_mean_loss = (per_sample_losses * w).sum() / w.sum().clamp(min=1e-6)
+    else:
+        batched_mean_loss = per_sample_losses.mean()
     return per_sample_losses, batched_mean_loss
 
 
@@ -266,7 +275,10 @@ class PreparedDatasetCache:
                     "prompt_length": tensors["prompt_length"],
                     "answer_length": tensors["answer_length"],
                 }
+            if "mm_token_type_ids" in tensors:
+                sample_item["mm_token_type_ids"] = tensors["mm_token_type_ids"]
 
+            sample_item["sample_weight"] = float(getattr(rec, "sample_weight", 1.0))
             prepared_samples.append(sample_item)
 
         # Atomic file write
@@ -517,6 +529,10 @@ class PinnedPrefetchDataLoader:
                 # Collate batch on host
                 if "inputs_embeds" in batch_items[0]:
                     collated = collate_cached_vision_batch(batch_items)
+                elif len(batch_items) > 1:
+                    from spatialforge.models.vl_adapter import collate_training_batch
+
+                    collated = collate_training_batch(batch_items)
                 else:
                     item = batch_items[0]
                     collated = {
@@ -526,6 +542,16 @@ class PinnedPrefetchDataLoader:
                         "pixel_values": item["pixel_values"],
                         "image_grid_thw": item["image_grid_thw"],
                     }
+                    if "mm_token_type_ids" in item:
+                        collated["mm_token_type_ids"] = (
+                            item["mm_token_type_ids"].unsqueeze(0)
+                            if item["mm_token_type_ids"].dim() == 1
+                            else item["mm_token_type_ids"]
+                        )
+                    if "sample_weight" in item:
+                        collated["sample_weight"] = torch.tensor(
+                            [float(item["sample_weight"])], dtype=torch.float32
+                        )
 
                 # Pin memory if enabled
                 if self.pin_memory:

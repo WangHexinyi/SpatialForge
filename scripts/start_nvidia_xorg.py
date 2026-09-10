@@ -40,7 +40,8 @@ def _nvidia_visible_bus():
     if out.returncode != 0 or not out.stdout.strip():
         raise RuntimeError("nvidia-smi did not report a visible NVIDIA GPU")
     line = out.stdout.strip().splitlines()[0]
-    m = re.match(r"([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-9])", line)
+    # nvidia-smi may print a 4- or 8-digit PCI domain (e.g. 00000000:4C:00.0)
+    m = re.match(r"([0-9a-fA-F]+):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-9])", line)
     if not m:
         raise RuntimeError(f"cannot parse nvidia-smi bus id: {line}")
     _, b, d, f = m.groups()

@@ -494,6 +494,7 @@ class TrainingSampleRecord:
     question: str
     answer: str
     tags: Tuple[str, ...]
+    sample_weight: float = 1.0
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], base_dir: Optional[Path] = None) -> "TrainingSampleRecord":
@@ -528,6 +529,7 @@ class TrainingSampleRecord:
             question=str(data["question"]),
             answer=str(data["answer"]),
             tags=tuple(data.get("tags", [])),
+            sample_weight=float(data.get("sample_weight", 1.0)),
         )
 
 
@@ -591,18 +593,72 @@ def create_lora_config(
     )
 
 
+#: Trainability profiles (small, explicit; not a model registry).
+#: A -- conservative: LM LoRA, vision tower frozen.
+#: B -- recommended multimodal adaptation: A + merger/projector + upper vision
+#:      blocks LoRA.
+#: C -- higher capacity: A + merger + all vision blocks LoRA.
+TRAINABILITY_PROFILES = ("A", "B", "C")
+
+_VISION_BLOCK_LINEAR_LEAVES = {
+    "qkv", "proj", "q_proj", "k_proj", "v_proj", "o_proj",
+    "linear_fc1", "linear_fc2", "fc1", "fc2",
+    "gate_proj", "up_proj", "down_proj",
+}
+
+
+def collect_trainability_targets(model: Any, profile: str = "A") -> List[str]:
+    """Enumerate explicit Linear module paths for trainability profile A/B/C."""
+    import re
+    import torch.nn as nn
+
+    profile = str(profile).upper()
+    if profile not in TRAINABILITY_PROFILES:
+        raise ValueError(f"unknown trainability profile: {profile}")
+
+    lm_names: List[str] = []
+    merger_names: List[str] = []
+    vision_blocks: Dict[int, List[str]] = {}
+
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        leaf = name.split(".")[-1]
+        if "visual" not in name and ("language_model" in name or name.startswith("model.layers.")):
+            if leaf in LORA_TARGET_PROJECTIONS:
+                lm_names.append(name)
+            continue
+        if "visual" in name and ("merger" in name or "projector" in name):
+            merger_names.append(name)
+            continue
+        if "visual" in name and ".blocks." in name and leaf in _VISION_BLOCK_LINEAR_LEAVES:
+            m = re.search(r"\.blocks\.(\d+)\.", name)
+            if m:
+                vision_blocks.setdefault(int(m.group(1)), []).append(name)
+
+    targets = list(lm_names)
+    if profile in ("B", "C"):
+        targets.extend(merger_names)
+        block_ids = sorted(vision_blocks)
+        if profile == "B":
+            block_ids = block_ids[-4:]
+        for bid in block_ids:
+            targets.extend(vision_blocks[bid])
+    # deterministic + unique
+    seen = set()
+    out = []
+    for t in targets:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def format_chat_prompt(processor: Any, image: Image.Image, question: str) -> str:
-    """Apply Qwen2.5-VL chat template to format user question with image."""
-    msgs = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-    return processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    """Apply the external model's chat template (thin adapter, not hardcoded)."""
+    from spatialforge.models.vl_adapter import format_prompt
+
+    return format_prompt(processor, image, question)
 
 
 def build_training_tensors(
@@ -616,30 +672,9 @@ def build_training_tensors(
     Prompt tokens: labels = -100
     Answer tokens + EOS: supervised (labels = token_ids)
     """
-    import torch
+    from spatialforge.models.vl_adapter import build_training_tensors as _build
 
-    prompt_text = format_chat_prompt(processor, image, question)
-    inputs = processor(text=[prompt_text], images=[image], padding=False, return_tensors="pt")
-
-    prompt_ids = inputs["input_ids"][0]
-    ans_text = answer + processor.tokenizer.eos_token
-    ans_ids = processor.tokenizer(ans_text, add_special_tokens=False)["input_ids"]
-
-    combined_input_ids = torch.cat([prompt_ids, torch.tensor(ans_ids, dtype=torch.long)])
-    labels = combined_input_ids.clone()
-    labels[: len(prompt_ids)] = -100
-
-    attention_mask = torch.ones_like(combined_input_ids)
-
-    return {
-        "input_ids": combined_input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-        "pixel_values": inputs["pixel_values"],
-        "image_grid_thw": inputs["image_grid_thw"],
-        "prompt_length": len(prompt_ids),
-        "answer_length": len(ans_ids),
-    }
+    return _build(processor, image, question, answer)
 
 
 def collate_single_sample_batch(
@@ -667,6 +702,9 @@ def collate_single_sample_batch(
         "pixel_values": item["pixel_values"],
         "image_grid_thw": item["image_grid_thw"],
     }
+    if "mm_token_type_ids" in item:
+        mm = item["mm_token_type_ids"]
+        collated["mm_token_type_ids"] = mm.unsqueeze(0) if mm.dim() == 1 else mm
 
     if device is not None:
         collated = {
@@ -703,22 +741,24 @@ def run_single_forward_step(
 ) -> Tuple[float, Any]:
     """Execute a single forward step and return loss value and model outputs.
 
-    Uses compute_batched_per_example_loss when a multi-sample cached vision batch
-    is provided to guarantee exact per-example weighting (1/B sum L_i).
+    For multi-sample batches, uses compute_batched_per_example_loss so each
+    sample is weighted exactly 1/B regardless of answer length (identical
+    objective to sequential microbatch-1 accumulation).
     """
     import torch
     from spatialforge.experiment.pipeline import compute_batched_per_example_loss
 
+    labels = batch.get("labels")
+    batch_size = labels.shape[0] if labels is not None else 1
+    weights = batch.get("sample_weight")
     with torch.set_grad_enabled(True):
-        if "inputs_embeds" in batch and batch.get("labels") is not None and batch["inputs_embeds"].shape[0] > 1:
-            outputs = model(
-                inputs_embeds=batch["inputs_embeds"],
-                attention_mask=batch.get("attention_mask"),
-            )
-            _, loss = compute_batched_per_example_loss(outputs.logits, batch["labels"])
+        if labels is not None and batch_size > 1:
+            call_batch = {k: v for k, v in batch.items() if k not in ("labels", "sample_weight")}
+            outputs = model(**call_batch)
+            _, loss = compute_batched_per_example_loss(outputs.logits, labels, sample_weights=weights)
             outputs.loss = loss
         else:
-            outputs = model(**batch)
+            outputs = model(**{k: v for k, v in batch.items() if k != "sample_weight"})
             loss = outputs.loss
 
         if not torch.isfinite(loss):
@@ -772,26 +812,12 @@ def run_inference_greedy(
     device: str = "cuda",
 ) -> str:
     """Execute single-sample greedy inference and return raw generated text."""
-    import torch
+    from spatialforge.models.vl_adapter import infer_greedy
 
-    prompt_text = format_chat_prompt(processor, image, question)
-    inputs = processor(text=[prompt_text], images=[image], padding=False, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    if "pixel_values" in inputs and inputs["pixel_values"].dtype == torch.float32:
-        inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
-
-    prompt_len = inputs["input_ids"].shape[1]
-
-    with torch.no_grad():
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,  # greedy decoding
-        )
-
-    output_ids = generated_ids[0][prompt_len:]
-    answer = processor.decode(output_ids, skip_special_tokens=True)
-    return answer.strip()
+    return infer_greedy(
+        model, processor, image, question,
+        max_new_tokens=max_new_tokens, device=device,
+    )
 
 
 @dataclass
@@ -915,8 +941,31 @@ def run_formal_training_loop(
 
     target_records = records[:total_samples] if max_microbatches is not None else records
 
+    # ---- family-aware execution: never silently use an incorrect cache ----
+    model_family = "unknown"
+    try:
+        from spatialforge.models.vl_adapter import detect_family
+
+        _base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        model_family = detect_family(_base.config)
+    except Exception:
+        pass
+    vision_cache_skipped_reason = None
+    use_vision_cache = bool(config.use_vision_cache)
+    if use_vision_cache and model_family == "qwen3_vl":
+        use_vision_cache = False
+        vision_cache_skipped_reason = (
+            "qwen3_vl visual outputs carry deepstack multi-level features; the "
+            "legacy pooler-only feature cache is not numerically equivalent, so the "
+            "batched pixel_values path is used instead (reported, not silent)."
+        )
+
+    prep_seconds = 0.0
     if use_optimized_pipeline:
-        if config.use_vision_cache:
+        prep_t0 = time.time()
+        if sampler is not None and hasattr(sampler, "set_phase"):
+            sampler.set_phase("vision_cache_prep")
+        if use_vision_cache:
             from spatialforge.experiment.pipeline import FrozenVisionFeatureCache, DecodedImageCache
             vc_cache = FrozenVisionFeatureCache(cache_dir=cache_dir)
             img_cache = DecodedImageCache()
@@ -938,12 +987,20 @@ def run_formal_training_loop(
                         "inputs_embeds": in_emb,
                         "attention_mask": t["attention_mask"],
                         "labels": t["labels"],
+                        "sample_weight": float(getattr(r, "sample_weight", 1.0)),
                     })
         else:
-            cache_key = compute_pipeline_cache_key(f"group_{group.lower()}", dataset_hash=f"formal_{group}_{len(target_records)}")
+            cache_key = compute_pipeline_cache_key(
+                f"group_{group.lower()}",
+                dataset_hash=f"formal_{group}_{len(target_records)}",
+                model_path=getattr(processor, "name_or_path", None) or DEFAULT_MODEL_PATH,
+            )
             cache = PreparedDatasetCache(cache_dir=cache_dir)
             prepared_samples = cache.get_or_build(target_records, processor, cache_key=cache_key)
+        prep_seconds = time.time() - prep_t0
 
+        if sampler is not None and hasattr(sampler, "set_phase"):
+            sampler.set_phase("train_active")
         for epoch in range(config.num_train_epochs):
             prefetcher = PinnedPrefetchDataLoader(
                 prepared_samples,
@@ -952,7 +1009,12 @@ def run_formal_training_loop(
                 queue_size=8,
             )
             for batch in prefetcher:
-                current_bs = batch["inputs_embeds"].shape[0] if "inputs_embeds" in batch else 1
+                if "inputs_embeds" in batch:
+                    current_bs = batch["inputs_embeds"].shape[0]
+                elif "input_ids" in batch:
+                    current_bs = batch["input_ids"].shape[0]
+                else:
+                    current_bs = 1
                 raw_loss_val, outputs = run_single_forward_step(model, batch)
                 raw_losses.append(raw_loss_val)
 
@@ -1068,13 +1130,26 @@ def run_formal_training_loop(
     adapter_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(adapter_dir)
 
+    train_active_seconds = max(wall_time - prep_seconds, 0.0)
+    vc_stats = None
+    vc_disk = None
+    if use_vision_cache and "vc_cache" in locals():
+        vc_stats = vc_cache.get_stats()
+        vc_disk = vc_cache.get_disk_size_bytes()
     return {
         "training_profile_id": config.training_profile_id,
+        "model_family": model_family,
         "microbatch_size": config.per_device_train_batch_size,
         "gradient_accumulation_steps": config.gradient_accumulation_steps,
         "effective_batch_size": config.effective_batch_size,
         "gradient_checkpointing": config.gradient_checkpointing,
-        "vision_cache_enabled": config.use_vision_cache,
+        "vision_cache_enabled": use_vision_cache,
+        "vision_cache_requested": bool(config.use_vision_cache),
+        "vision_cache_skipped_reason": vision_cache_skipped_reason,
+        "phase_seconds": {
+            "vision_cache_prep": round(prep_seconds, 2),
+            "train_active": round(train_active_seconds, 2),
+        },
         "total_microbatches": microbatch_count,
         "total_samples": processed_samples,
         "total_optimizer_steps": optimizer_step_count,
@@ -1088,10 +1163,11 @@ def run_formal_training_loop(
         "mean_microbatch_time_sec": wall_time / max(microbatch_count, 1),
         "mean_sample_time_sec": wall_time / max(processed_samples, 1),
         "samples_per_sec": processed_samples / max(wall_time, 0.001),
+        "train_active_samples_per_sec": processed_samples / max(train_active_seconds, 0.001),
         "adapter_dir": str(adapter_dir),
         "telemetry": telemetry_summary,
-        "vision_cache_stats": vc_cache.get_stats() if config.use_vision_cache else None,
-        "vision_cache_disk_bytes": vc_cache.get_disk_size_bytes() if config.use_vision_cache else None,
+        "vision_cache_stats": vc_stats,
+        "vision_cache_disk_bytes": vc_disk,
     }
 
 

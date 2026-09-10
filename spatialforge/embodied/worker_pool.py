@@ -30,6 +30,30 @@ def partition_jobs(jobs: List[Dict[str, Any]], num_slots: int) -> List[List[Dict
     return shards
 
 
+def partition_jobs_by_house(
+    jobs: List[Dict[str, Any]], num_slots: int
+) -> List[List[Dict[str, Any]]]:
+    """Assign whole houses to slots so each worker reuses loaded Unity houses.
+
+    House loading dominates per-job cost; round-robin sharding makes every
+    worker reload many houses. This keeps each house on one worker while
+    balancing total job counts (deterministic largest-first assignment).
+    """
+    by_house: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for job in jobs:
+        key = str(job.get("house") or "")
+        if key not in by_house:
+            by_house[key] = []
+            order.append(key)
+        by_house[key].append(job)
+    shards: List[List[Dict[str, Any]]] = [[] for _ in range(max(1, num_slots))]
+    for key in sorted(order, key=lambda k: (-len(by_house[k]), k)):
+        i = min(range(len(shards)), key=lambda s: (len(shards[s]), s))
+        shards[i].extend(by_house[key])
+    return shards
+
+
 def load_result_rows(results_file: str) -> List[Dict[str, Any]]:
     rows = []
     if os.path.exists(results_file):
@@ -223,8 +247,12 @@ def run_worker_pool(
     tele = RunTelemetry()
     t0 = time.time()
 
-    # partition once; on respawn we filter out already-finished job ids
-    shards = partition_jobs(jobs, num_workers)
+    # partition once; on respawn we filter out already-finished job ids.
+    # ProcTHOR jobs are grouped by house so each worker reuses loaded houses.
+    if jobs and all(j.get("house") for j in jobs):
+        shards = partition_jobs_by_house(jobs, num_workers)
+    else:
+        shards = partition_jobs(jobs, num_workers)
 
     done: Dict[str, Dict[str, Any]] = {}
     processes: Dict[int, subprocess.Popen] = {}

@@ -76,6 +76,20 @@ FULL_NAV_ACTIONS = [
 # --------------------------------------------------------------------------
 
 
+class AgentActionOrigin(str, Enum):
+    """Where an action came from.
+
+    Setup/reset/spawn are environment bookkeeping and must never be mistaken
+    for a model output; the God View / research record surfaces this explicitly.
+    """
+
+    MODEL = "model"
+    SETUP = "setup"
+    SPAWN = "spawn"
+    RESET = "reset"
+    VERIFIER = "verifier"
+
+
 @dataclass
 class AgentAction:
     """A single agent action plus its executed outcome.
@@ -88,6 +102,8 @@ class AgentAction:
     step: int = 0
     # Provided at request time:
     parameters: Dict[str, Any] = field(default_factory=dict)
+    #: "model" for genuine policy actions; setup/spawn/reset/verifier otherwise.
+    origin: str = AgentActionOrigin.MODEL.value
     # Populated by the environment after execution:
     success: Optional[bool] = None
     error: Optional[str] = None
@@ -107,6 +123,7 @@ class AgentAction:
             "action_type": self.action_type.value,
             "step": self.step,
             "parameters": dict(self.parameters or {}),
+            "origin": self.origin,
             "success": self.success,
             "error": self.error,
             "collision": self.collision,
@@ -120,6 +137,7 @@ class AgentAction:
             action_type=AgentActionType(data["action_type"]),
             step=int(data.get("step", 0)),
             parameters=dict(data.get("parameters") or {}),
+            origin=str(data.get("origin", AgentActionOrigin.MODEL.value)),
             success=data.get("success"),
             error=data.get("error"),
             collision=data.get("collision"),

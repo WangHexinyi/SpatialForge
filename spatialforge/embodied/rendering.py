@@ -15,6 +15,25 @@ import subprocess
 from typing import Optional
 
 
+#: Sensor-fidelity default render quality. The exposure diagnostic
+#: (outputs/diagnostics/exposure + render_quality) shows AI2-THOR ``Low``
+#: blows out highlights (mean frac>=250 up to 0.38), while ``Medium`` is the
+#: lowest quality whose dynamic range is visually normal (mean frac>=250
+#: ~0.01, max ~0.03). Overridable for explicit experiments via
+#: ``SF_RENDER_QUALITY``; never silently downgraded.
+DEFAULT_RENDER_QUALITY = "Medium"
+VALID_RENDER_QUALITIES = ("Low", "Medium", "High", "Very High", "Ultra")
+
+
+def resolve_render_quality(quality: Optional[str] = None) -> str:
+    q = quality or os.environ.get("SF_RENDER_QUALITY") or DEFAULT_RENDER_QUALITY
+    if q not in VALID_RENDER_QUALITIES:
+        raise ValueError(
+            f"unknown AI2-THOR quality {q!r}; valid: {VALID_RENDER_QUALITIES}"
+        )
+    return q
+
+
 class RendererNotAvailableError(RuntimeError):
     pass
 

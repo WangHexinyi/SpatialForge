@@ -39,6 +39,7 @@ from spatialforge.embodied.records import (
     build_student_training_record,
 )
 from spatialforge.embodied.rollout import ProcthorEpisodeGenerator
+from spatialforge.embodied.spawn_semantics import setup_block
 
 _EXECUTABLE = frozenset({
     "MoveAhead", "RotateLeft", "RotateRight", "LookUp", "LookDown",
@@ -96,6 +97,13 @@ def permitted_history_list(env: EmbodiedEnvironment) -> List[Dict[str, Any]]:
     return out
 
 
+def no_progress_update(cell, last_cell, count):
+    """Track consecutive executed steps that stay in the same 0.5 m xz cell."""
+    if cell == last_cell:
+        return last_cell, count + 1
+    return cell, 0
+
+
 def build_decision_question(env: EmbodiedEnvironment) -> str:
     """Question text identical in format to the BC training prompts."""
     obs = env.observation
@@ -124,6 +132,7 @@ class ProcthorModelEpisodeGenerator(ProcthorEpisodeGenerator):
         seed: Optional[int] = None,
         max_consecutive_invalid: int = 5,
         setup_timeout_s: float = 150.0,
+        max_no_progress_steps: int = 0,
     ) -> Dict[str, Any]:
         import random
 
@@ -177,11 +186,16 @@ class ProcthorModelEpisodeGenerator(ProcthorEpisodeGenerator):
             self.house_id, category, max_steps=max_steps, agent=agent
         )
         initial_visible = bool(env.observation.target_visible)
+        setup = setup_block(spawn, initial.agent_state)
 
         decisions: List[Dict[str, Any]] = []
         executed: List[Any] = []  # genuine EmbodiedTransitions from env.step
         consec_invalid = 0
         terminal_reason = None
+        #: opt-in no-progress early stop (raw decisions/frames are still
+        #: persisted); disabled by default so existing experiments are unchanged.
+        _last_cell = None
+        _no_progress = 0
 
         while env.episode.status == EpisodeStatus.RUNNING:
             frame_ref = len(executed)
@@ -244,6 +258,20 @@ class ProcthorModelEpisodeGenerator(ProcthorEpisodeGenerator):
             trans = env.step(_ACTION_BY_LABEL[action_name])
             if trans is not None:
                 executed.append(trans)
+                if max_no_progress_steps > 0:
+                    st = trans.agent_state
+                    cell = (round(st.position[0] * 2) / 2, round(st.position[2] * 2) / 2)
+                    _last_cell, _no_progress = no_progress_update(
+                        cell, _last_cell, _no_progress
+                    )
+                    if _no_progress >= max_no_progress_steps:
+                        env._finish(
+                            EpisodeStatus.FAILURE, False,
+                            f"no_progress_early_stop: {_no_progress} consecutive "
+                            "steps without spatial progress.",
+                        )
+                        terminal_reason = "no_progress_early_stop"
+                        break
 
         # persist genuine frames: init + one per executed transition (same layout
         # as teacher rollouts; the Done transition duplicates the last frame)
@@ -272,11 +300,18 @@ class ProcthorModelEpisodeGenerator(ProcthorEpisodeGenerator):
                 "resample_attempts": spawn["resample_attempts"],
             },
             frames=[os.path.relpath(p, self.out_dir) if self.out_dir else p for p in frame_names],
+            setup=setup,
+            render_quality=self.backend.quality,
+            house_path=(
+                os.path.abspath(str(self.backend.house_source))
+                if self.backend.house_source else None
+            ),
         )
         privileged["decisions"] = decisions
         privileged["model_controlled"] = True
         privileged["terminal_reason"] = terminal_reason or env.episode.success_reason
         self._persist_episode_records(episode_id, student, privileged, decisions)
+        self._persist_scene()
         self._clear_live(episode_id)
 
         invalid = [d for d in decisions if d.get("invalid")]

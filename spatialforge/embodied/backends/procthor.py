@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from spatialforge.embodied.contracts import (
     AgentAction,
+    AgentActionOrigin,
     AgentActionType,
     AgentObservation,
     AgentState,
@@ -43,6 +44,7 @@ from spatialforge.embodied.environment import EmbodiedBackend
 from spatialforge.embodied.rendering import (
     RendererNotAvailableError,
     ensure_nvidia_renderer,
+    resolve_render_quality,
 )
 
 _THOR_ACTION = {
@@ -88,7 +90,7 @@ class ProcTHORBackend(EmbodiedBackend):
         house: Union[str, Path, dict, None] = None,
         width: int = 256,
         height: int = 256,
-        quality: str = "Low",
+        quality: Optional[str] = None,
         scene: str = "Procedural",
         x_display: Optional[str] = None,
         require_nvidia: bool = False,
@@ -97,7 +99,7 @@ class ProcTHORBackend(EmbodiedBackend):
         self._house_data: Optional[dict] = None
         self.width = width
         self.height = height
-        self.quality = quality
+        self.quality = resolve_render_quality(quality)
         self.scene = scene
         self.x_display = x_display
         self.require_nvidia = require_nvidia
@@ -137,6 +139,10 @@ class ProcTHORBackend(EmbodiedBackend):
         src = opts.get("house") or self.house_source or house_id or None
         if src is None:
             raise ProcTHORError("A ProcTHOR house dict or path is required.")
+        if isinstance(src, (str, Path)):
+            # Remember the resolved path so the live Unity God View can reuse the
+            # exact same house the running controller instantiated.
+            self.house_source = str(src)
         self._house_data = load_house_json(src)
 
         Controller = self._imports()
@@ -176,15 +182,44 @@ class ProcTHORBackend(EmbodiedBackend):
             self._reachable.append((float(p["x"]), float(y), float(p.get("z", 0.0))))
         return self._reachable
 
+    @staticmethod
+    def _as_position(p: Any) -> Dict[str, float]:
+        if isinstance(p, dict):
+            return {"x": float(p.get("x", 0.0)), "y": float(p.get("y", 0.0)), "z": float(p.get("z", 0.0))}
+        return {"x": float(p[0]), "y": float(p[1]), "z": float(p[2])}
+
+    @staticmethod
+    def _as_rotation(r: Any) -> Dict[str, float]:
+        if isinstance(r, dict):
+            return {"x": float(r.get("x", 0.0)), "y": float(r.get("y", 0.0)), "z": float(r.get("z", 0.0))}
+        return {"x": 0.0, "y": float(r), "z": 0.0}
+
     def _teleport(self, agent: dict) -> None:
         params = dict(
             action="TeleportFull",
-            position=agent["position"],
-            rotation=agent.get("rotation", {"x": 0, "y": 0, "z": 0}),
+            position=self._as_position(agent["position"]),
+            rotation=self._as_rotation(agent.get("rotation", {"x": 0, "y": 0, "z": 0})),
             horizon=float(agent.get("horizon", 0)),
             standing=bool(agent.get("standing", True)),
         )
         self._event = self.controller.step(params)
+        md = self._event.metadata
+        if not md.get("lastActionSuccess", False):
+            raise ProcTHORError(
+                "TeleportFull failed during episode spawn: "
+                f"{md.get('errorMessage')} (requested position={params['position']}, "
+                f"rotation={params['rotation']}, horizon={params['horizon']})"
+            )
+        actual = md.get("agent", {}).get("position", {})
+        requested = params["position"]
+        err = max(
+            abs(float(actual.get(k, 0.0)) - requested[k]) for k in ("x", "y", "z")
+        )
+        if err > 0.05:
+            raise ProcTHORError(
+                f"TeleportFull did not reach the requested spawn: requested={requested} "
+                f"actual={actual} err={err:.3f}m"
+            )
 
     def set_agent_pose(
         self,
@@ -276,6 +311,18 @@ class ProcTHORBackend(EmbodiedBackend):
     def house(self) -> Optional[HouseInfo]:
         return self._house_info
 
+    def house_path(self) -> Optional[str]:
+        """Filesystem path of the loaded house JSON, when one was supplied.
+
+        Used by the live Unity God View to reuse the same real house geometry
+        that the running controller already instantiated.
+        """
+        src = self.house_source
+        if isinstance(src, (str, Path)):
+            p = Path(src)
+            return str(p) if p.is_file() else None
+        return None
+
     def _objects(self) -> List[dict]:
         return self._event.metadata.get("objects", []) if self._event is not None else []
 
@@ -288,14 +335,31 @@ class ProcTHORBackend(EmbodiedBackend):
 
     # -- reset / step ------------------------------------------------
     def reset(self, task: ObjectSearchTask, **opts) -> Dict[str, Any]:
-        # re-instantiate the house fresh for the episode, then start pose
+        # re-instantiate the house fresh for the episode, then start pose.
+        # The reset/spawn is environment setup -- it is NOT a model action, so
+        # no synthetic AgentAction is fabricated (the old MoveAhead placeholder
+        # made the first frame look like a model teleport).
         self.controller.step(dict(action="ResetObjectFilter"))
         ev = self.controller.step(dict(action="CreateHouse", house=self._house_data, renderImage=False))
         self._event = ev
         agent = opts.get("agent") or _agent_meta(self._house_data)
         self._teleport(agent)
         self._index_metadata(self._event.metadata)
-        return self._snapshot(action=self._noop_action())
+        p = agent.get("position", {})
+        if isinstance(p, dict):
+            pos = [float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("z", 0.0))]
+        else:
+            pos = [float(p[0]), float(p[1]), float(p[2])]
+        rot = agent.get("rotation", {})
+        yaw = float(rot.get("y", 0.0)) if isinstance(rot, dict) else 0.0
+        self._last_setup = {
+            "kind": "spawn",
+            "origin": AgentActionOrigin.SPAWN.value,
+            "position": pos,
+            "rotation_yaw_deg": yaw,
+            "horizon_deg": float(agent.get("horizon", 0.0)),
+        }
+        return self._snapshot(action=None)
 
     def apply_action(self, action_type, parameters, step) -> Dict[str, Any]:
         thor_name = _THOR_ACTION.get(action_type)
@@ -308,6 +372,7 @@ class ProcTHORBackend(EmbodiedBackend):
         action = AgentAction(
             action_type=action_type,
             step=step,
+            origin=AgentActionOrigin.MODEL.value,
             success=success,
             collision=bool(md.get("collided", False)),
             blocked=not success,
@@ -317,7 +382,7 @@ class ProcTHORBackend(EmbodiedBackend):
         self._index_metadata(md)
         return self._snapshot(action=action)
 
-    def _snapshot(self, action: AgentAction) -> Dict[str, Any]:
+    def _snapshot(self, action: Optional[AgentAction]) -> Dict[str, Any]:
         md = self._event.metadata
         ag = md.get("agent", {})
         pos = ag.get("position", {"x": 0.0, "y": 0.0, "z": 0.0})
@@ -328,26 +393,32 @@ class ProcTHORBackend(EmbodiedBackend):
             camera_horizon_deg=float(ag.get("cameraHorizon", 0.0)),
             is_crouching=bool(ag.get("isCrouching", False)),
             is_standing=bool(ag.get("isStanding", not bool(ag.get("isCrouching", False)))),
-            step_count=int(md.get("step", action.step)),
-            last_action=action.describe(),
-            last_action_success=action.success,
-            collision=bool(action.collision),
+            step_count=int(md.get("step", action.step if action else 0)),
+            last_action=action.describe() if action else None,
+            last_action_success=action.success if action else None,
+            collision=bool(action.collision) if action else False,
             room=ag.get("roomId"),
             timestamp_ms=int(time.time() * 1000),
         )
         obs = AgentObservation(
-            step=action.step,
+            step=action.step if action else 0,
             timestamp_ms=int(time.time() * 1000),
             rgb=self._event.frame,
-            frame_id=f"procthor-{action.step}",
+            frame_id=f"procthor-{action.step if action else 0}",
             image_path=None,
             camera_horizon_deg=agent_state.camera_horizon_deg,
             cause_action=action,
         )
         return {"observation": obs, "agent_state": agent_state, "action": action}
 
-    @staticmethod
-    def _noop_action() -> AgentAction:
-        return AgentAction(
-            action_type=AgentActionType.MOVE_AHEAD, step=0, success=True
-        )
+    # -- researcher 3D scene geometry (God View) ---------------------
+    def scene_geometry(self) -> Dict[str, Any]:
+        """Compact 3D semantic scene from ProcTHOR house JSON + Thor metadata.
+
+        Missing fields are reported as unavailable (``None`` / explicit
+        ``unavailable`` list) instead of being fabricated.
+        """
+        from spatialforge.inspector.scene3d import build_scene3d
+
+        md_objects = self._objects()
+        return build_scene3d(self._house_data, thor_objects=md_objects)

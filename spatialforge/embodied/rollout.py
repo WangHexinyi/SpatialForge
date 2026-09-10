@@ -37,6 +37,8 @@ from spatialforge.embodied.records import (
     build_privileged_research_record,
     build_student_training_record,
 )
+from spatialforge.embodied.rendering import resolve_render_quality
+from spatialforge.embodied.spawn_semantics import setup_block
 
 # structural / non-searchable categories we never pick as targets
 _NON_TARGET = {
@@ -80,12 +82,14 @@ class ProcthorEpisodeGenerator:
         from spatialforge.embodied.backends.procthor import ProcTHORBackend
 
         self.backend = ProcTHORBackend(
-            house=house_source, width=width, height=height, quality="Low",
+            house=house_source, width=width, height=height,
+            quality=resolve_render_quality(),
             x_display=x_display, require_nvidia=require_nvidia,
         )
         self.house_info = self.backend.load_house(seed=self.seed)
         self.house_id = self.house_info.house_id
         self._closed = False
+        self._scene_written = False
 
     def close(self) -> None:
         if not self._closed:
@@ -165,6 +169,7 @@ class ProcthorEpisodeGenerator:
             self.house_id, category, max_steps=max_steps, agent=agent
         )
         initially_visible = bool(env.observation.target_visible)
+        setup = setup_block(spawn, initial.agent_state)
 
         # ---- genuine teacher drive -----------------------------------
         teacher = ThorObjectSearchTeacher(env, target_oid)
@@ -193,8 +198,15 @@ class ProcthorEpisodeGenerator:
                 "min_dist_m": spawn["min_dist_m"],
             },
             frames=[os.path.relpath(p, self.out_dir) if self.out_dir else p for p in frame_names],
+            setup=setup,
+            render_quality=self.backend.quality,
+            house_path=(
+                os.path.abspath(str(self.backend.house_source))
+                if self.backend.house_source else None
+            ),
         )
         self._persist_records(episode_id, student, privileged)
+        self._persist_scene()
 
         return {
             "episode_id": episode_id,
@@ -259,7 +271,7 @@ class ProcthorEpisodeGenerator:
             if dist(easy) < min_spawn_m:
                 self.backend.set_agent_pose(
                     (easy[0] * GRID_SPACING, grid[easy], easy[1] * GRID_SPACING),
-                    0.0, 0.0, render=True,
+                    0.0, 0.0, render=False,
                 )
                 probe_attempts += 1
 
@@ -271,7 +283,7 @@ class ProcthorEpisodeGenerator:
             d = dist(cell)
             md = self.backend.set_agent_pose(
                 (cell[0] * GRID_SPACING, y, cell[1] * GRID_SPACING),
-                0.0, 0.0, render=True,
+                0.0, 0.0, render=False,
             )
             tried += 1
             visible = self._visible_in(md, target_oid)
@@ -327,6 +339,37 @@ class ProcthorEpisodeGenerator:
             json.dump(student, f, indent=2, default=_json_default)
         with open(os.path.join(ep_dir, "privileged_research_record.json"), "w") as f:
             json.dump(privileged, f, indent=2, default=_json_default)
+
+    def _persist_scene(self) -> None:
+        """Persist the 3D semantic scene once per loaded house (God View).
+
+        Stored under ``<out_dir>/_scenes/<house_stem>.json`` so episodes can be
+        replayed in 3D without re-instantiating AI2-THOR.
+        """
+        if not self.out_dir or self._scene_written:
+            return
+        try:
+            from spatialforge.embodied.bc_manifest import house_stem
+            import json
+
+            src = getattr(self.backend, "house_source", None)
+            stem = house_stem(str(src)) if src else "house"
+            scene_dir = os.path.join(self.out_dir, "_scenes")
+            os.makedirs(scene_dir, exist_ok=True)
+            payload = {
+                "schema": "spatialforge_scene3d_episode_source.v1",
+                "house_stem": stem,
+                "house_path": os.path.abspath(str(src)) if src else None,
+                "scene": self.backend.scene_geometry(),
+            }
+            tmp = os.path.join(scene_dir, f".{stem}.json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, default=_json_default)
+            os.replace(tmp, os.path.join(scene_dir, f"{stem}.json"))
+            self._scene_written = True
+        except Exception:
+            # scene capture is researcher tooling; never fail a real rollout
+            self._scene_written = True
 
     def _fail_record(self, episode_id, category, code, reason, started):
         record = {

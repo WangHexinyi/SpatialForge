@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from spatialforge.embodied.contracts import AgentActionType
+from spatialforge.embodied.contracts import AgentActionType, EpisodeStatus
 
 # world grid spacing produced by AI2-THOR navigation
 GRID_SPACING = 0.25
@@ -205,11 +205,14 @@ class ThorObjectSearchTeacher:
                     if tries >= self.max_tries_view_pose:
                         return None
                     tries += 1
+                    # privileged planning only needs authoritative visibility;
+                    # renderImage=False is metadata-equivalent (verified by
+                    # scripts/check_privileged_render.py) and ~1.4x faster.
                     md = self.backend.set_agent_pose(
                         (cell[0] * GRID_SPACING, any_y, cell[1] * GRID_SPACING),
                         rotation_yaw_deg=float(yaw),
                         horizon_deg=float(hor),
-                        render=True,
+                        render=False,
                     )
                     if self._authoritative_visible(md):
                         return {
@@ -251,15 +254,29 @@ class ThorObjectSearchTeacher:
         if nav_ok:
             self._face_goal_yaw(goal_yaw)
             if not self._any_visible():
-                self._scan_aim()
+                self._scan_360()
 
         visible = self._any_visible()
-        self._act(AgentActionType.DONE)  # verifier decides success
+        if visible:
+            self._act(AgentActionType.DONE)  # verifier decides success
+            return {
+                "planned": True,
+                "view_pose": view_pose,
+                "reached": nav_ok,
+                "visible_at_done": True,
+            }
+        # Never fabricate a Done while the target is not visible: that would
+        # write fake teacher truth into the trajectory. Fail explicitly instead.
+        if self.env.episode.status == EpisodeStatus.RUNNING:
+            self.env._finish(
+                EpisodeStatus.FAILURE, False,
+                "teacher reached the view pose but the target never became visible",
+            )
         return {
             "planned": True,
             "view_pose": view_pose,
             "reached": nav_ok,
-            "visible_at_done": visible,
+            "visible_at_done": False,
         }
 
     def _navigate(self, grid, start_key, goal_key, current_yaw) -> bool:
@@ -303,14 +320,31 @@ class ThorObjectSearchTeacher:
                 return
             self._do(act)
 
-    def _scan_aim(self) -> None:
-        # try a downward/upward camera nudge to bring a low object into view
-        for act in (AgentActionType.LOOK_DOWN, AgentActionType.STAND):
-            if self.env.episode.status.value != "running":
-                return
-            self._do(act)
-            if self._any_visible():
-                return
+    def _scan_360(self, max_actions: int = 40) -> None:
+        """Bounded in-place observation scan (horizons x full rotation)."""
+        budget = max_actions
+        horizon_plan = [
+            [],  # current horizon
+            [AgentActionType.LOOK_DOWN],
+            [AgentActionType.LOOK_DOWN],
+            [AgentActionType.LOOK_UP, AgentActionType.LOOK_UP, AgentActionType.LOOK_UP],
+            [AgentActionType.STAND],
+        ]
+        for adjust in horizon_plan:
+            for act in adjust:
+                if budget <= 0 or self.env.episode.status.value != "running":
+                    return
+                self._do(act)
+                budget -= 1
+                if self._any_visible():
+                    return
+            for _ in range(4):
+                if budget <= 0 or self.env.episode.status.value != "running":
+                    return
+                self._do(AgentActionType.ROTATE_LEFT)
+                budget -= 1
+                if self._any_visible():
+                    return
 
     # ------------------------------------------------------------------
     # helpers

@@ -135,7 +135,15 @@ class GpuTelemetrySampler:
         self.power_samples: List[float] = []
         self.mem_samples: List[float] = []
         self.clock_samples: List[float] = []
+        #: explicit phase markers so a whole-run average can never hide hot-loop
+        #: utilization (e.g. serial vision-cache prep vs train_active).
+        self.phase: str = "unlabeled"
+        self.phase_samples: Dict[str, Dict[str, List[float]]] = {}
         self.latest_stats: Dict[str, float] = self.nvml.query()
+
+    def set_phase(self, name: str) -> None:
+        with self._lock:
+            self.phase = str(name)
 
     def start(self) -> "GpuTelemetrySampler":
         """Start the background sampler thread."""
@@ -153,6 +161,12 @@ class GpuTelemetrySampler:
                 self.power_samples.append(stats["gpu_power_w"])
                 self.mem_samples.append(stats["gpu_memory_used_mb"])
                 self.clock_samples.append(stats.get("sm_clock_mhz", 0.0))
+                bucket = self.phase_samples.setdefault(
+                    self.phase, {"util": [], "power": [], "mem": []}
+                )
+                bucket["util"].append(stats["gpu_utilization_pct"])
+                bucket["power"].append(stats["gpu_power_w"])
+                bucket["mem"].append(stats["gpu_memory_used_mb"])
             self._stop_event.wait(self.sample_interval_sec)
 
     def stop(self) -> Dict[str, Any]:
@@ -192,6 +206,21 @@ class GpuTelemetrySampler:
                 "max": round(s[-1], 2),
             }
 
+        with self._lock:
+            phase_copy = {
+                name: {k: list(v) for k, v in bucket.items()}
+                for name, bucket in self.phase_samples.items()
+            }
+        phases = {}
+        for name, bucket in sorted(phase_copy.items()):
+            if not bucket["util"]:
+                continue
+            phases[name] = {
+                "samples": len(bucket["util"]),
+                "gpu_utilization": _stats(bucket["util"]),
+                "gpu_power_w": _stats(bucket["power"]),
+                "gpu_memory_mb": _stats(bucket["mem"]),
+            }
         return {
             "sample_count": len(utils),
             "gpu_utilization": _stats(utils),
@@ -199,6 +228,7 @@ class GpuTelemetrySampler:
             "gpu_memory_mb": _stats(mems),
             "nvml_gpu_memory_mb": _stats(mems),
             "sm_clock_mhz": _stats(clocks),
+            "phases": phases,
         }
 
     def close(self) -> None:

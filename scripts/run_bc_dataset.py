@@ -34,6 +34,7 @@ from spatialforge.embodied.bc_dataset import (  # noqa: E402
     scan_rows_leakage,
     write_manifest,
 )
+from spatialforge.embodied.rendering import resolve_render_quality  # noqa: E402
 from spatialforge.embodied.worker_pool import (  # noqa: E402
     DEFAULT_VENV_PYTHON,
     load_all_results,
@@ -90,6 +91,14 @@ def cmd_gen(args) -> int:
         tag=tag,
         k_offset=args.episodes_start,
     )
+    if getattr(args, "skip_done", False):
+        done = set()
+        for rd in glob.glob(os.path.join(args.out_root, "runs", "*")):
+            done.update(load_all_results(os.path.join(rd, "results")).keys())
+        before = len(jobs)
+        jobs = [j for j in jobs if j["job_id"] not in done]
+        print(f"[gen] skip-done: {before - len(jobs)} completed jobs filtered, "
+              f"{len(jobs)} remaining", flush=True)
     print(f"[gen] phase={args.phase} houses={len(houses)} jobs={len(jobs)}", flush=True)
     jobs_path = os.path.join(args.out_root, "runs", f"jobs-{args.phase}.json")
     os.makedirs(os.path.dirname(jobs_path), exist_ok=True)
@@ -115,6 +124,8 @@ def cmd_gen(args) -> int:
 
 
 def cmd_manifest(args) -> int:
+    from spatialforge.embodied import dataset_balance as db
+
     os.makedirs(args.out_root, exist_ok=True)
     run_dirs = sorted(glob.glob(os.path.join(args.out_root, "runs", "*")))
     result_rows = []
@@ -123,6 +134,7 @@ def cmd_manifest(args) -> int:
     house_map = bm.build_episode_house_map(result_rows)
     episode_rows = bm.load_student_records(args.out_root)
     rows = bm.collect_rows(episode_rows, house_map, args.out_root, "all")
+    outcomes = db.episode_outcomes(result_rows)
     print(f"[manifest] result rows={len(result_rows)} episodes w/records={len(episode_rows)} "
           f"expanded rows={len(rows)}", flush=True)
 
@@ -139,36 +151,100 @@ def cmd_manifest(args) -> int:
         return 2
     print("[manifest] leakage scan: 0 privileged leakage", flush=True)
 
+    # ---- dataset V2 policy: success-first core + controlled balance ----
+    classified_train = db.classify_rows(train_rows, outcomes)
+    classified_val = db.classify_rows(val_rows, outcomes)
+    core_info = None
+    if args.profile == "success_core":
+        train_rows, core_info = db.select_success_core(
+            classified_train, aux_failure_ratio=args.aux_failure_ratio, seed=args.seed
+        )
+        val_rows, val_core_info = db.select_success_core(
+            classified_val, aux_failure_ratio=0.0, seed=args.seed
+        )
+    else:
+        val_core_info = None
     train_rows = bm.cap_rows_deterministic(train_rows, args.train_cap)
     val_rows = bm.cap_rows_deterministic(val_rows, args.val_cap)
+    train_rows, balance_info = db.apply_balance(
+        train_rows, mode=args.balance, seed=args.seed,
+        episode_cap=args.episode_cap, min_class_count=args.min_class_count,
+    )
     write_manifest(train_rows, os.path.join(args.out_root, "bc_train.jsonl"))
     write_manifest(val_rows, os.path.join(args.out_root, "bc_val.jsonl"))
+    if balance_info.get("class_weights"):
+        with open(os.path.join(args.out_root, "class_weights.json"), "w", encoding="utf-8") as f:
+            json.dump(balance_info["class_weights"], f, indent=2)
+
+    # episode-level outcome statistics (teacher truth, never fabricated)
+    outcome_counts = {}
+    for r in result_rows:
+        code = str(r.get("outcome_code") or r.get("status") or "?")
+        outcome_counts[code] = outcome_counts.get(code, 0) + 1
+    n_eps = len(result_rows)
+    n_succ = sum(1 for r in result_rows if r.get("success"))
+    succ_steps = sum(int(r.get("steps", 0)) for r in result_rows if r.get("success"))
+    fail_steps = sum(int(r.get("steps", 0)) for r in result_rows if not r.get("success"))
+    episode_stats = {
+        "teacher_episodes": n_eps,
+        "teacher_successes": n_succ,
+        "teacher_success_rate": round(n_succ * 100.0 / max(n_eps, 1), 2),
+        "successful_steps": succ_steps,
+        "failed_steps": fail_steps,
+        "outcome_codes": outcome_counts,
+        "category_counts": _category_counts(result_rows),
+        "house_counts": _house_counts(result_rows),
+    }
+
     train_rep = bm.report_dataset(train_rows)
     val_rep = bm.report_dataset(val_rows)
     report = {
-        "schema": "embodied_bc_manifest.v1",
-        "version": "1.0.0",
+        "schema": "embodied_bc_manifest.v2",
+        "version": "2.0.0",
         "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "provenance": {
             "generator": "scripts/run_bc_dataset.py + spatialforge.embodied.rollout",
             "procthor_split_source": "official ProcTHOR-10K val.jsonl.gz (train-split houses "
                                      "unavailable: allenai/procthor-10k HF gated / S3 403; "
                                      "strict disjoint house-level split used instead)",
-            "renderer": "NVIDIA GLX (Xorg :0) quality=Low",
+            "renderer": f"NVIDIA GLX (Xorg :0) quality={resolve_render_quality()}",
             "resolution": "256x256",
-            "teacher": "ThorObjectSearchTeacher (privileged visible-goal nav)",
+            "teacher": "ThorObjectSearchTeacher (privileged visible-goal nav; Done gated on visibility)",
             "action_vocabulary": list(bm.BC_ACTION_VOCAB),
             "train_house_stems": train_stems,
             "val_house_stems": val_stems,
             "house_level_split_verified": len(set(train_stems) & set(val_stems)) == 0,
+            "profile": args.profile,
+            "aux_failure_ratio": args.aux_failure_ratio,
+            "balance": args.balance,
         },
+        "episode_stats": episode_stats,
+        "core_selection": core_info,
+        "val_core_selection": val_core_info,
+        "balance": balance_info,
         "train": train_rep,
         "val": val_rep,
     }
     with open(os.path.join(args.out_root, "dataset_report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
-    print("[manifest] DATASET_REPORT " + json.dumps(report, default=str)[:2500], flush=True)
+    print("[manifest] DATASET_REPORT " + json.dumps(report, default=str)[:3000], flush=True)
     return 0
+
+
+def _category_counts(rows) -> dict:
+    out = {}
+    for r in rows:
+        c = str(r.get("category", "?"))
+        out[c] = out.get(c, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _house_counts(rows) -> dict:
+    out = {}
+    for r in rows:
+        h = os.path.basename(str(r.get("house", "?")))
+        out[h] = out.get(h, 0) + 1
+    return dict(sorted(out.items()))
 
 
 def main() -> int:
@@ -188,6 +264,8 @@ def main() -> int:
     p.add_argument("--x-display", default=":0")
     p.add_argument("--no-nvidia", dest="no_nvidia", action="store_true")
     p.add_argument("--max-respawns", type=int, default=3)
+    p.add_argument("--skip-done", action="store_true",
+                   help="filter job_ids already present in previous run results")
     p.add_argument("--min-count", type=int, default=2)
     p.add_argument("--categories-per-house", type=int, default=6)
     p.add_argument("--episodes-per-category", type=int, default=3)
@@ -204,6 +282,13 @@ def main() -> int:
     p.add_argument("--out-root", default="outputs/embodied_bc/dataset")
     p.add_argument("--train-cap", type=int, default=6400)
     p.add_argument("--val-cap", type=int, default=1500)
+    p.add_argument("--profile", choices=["natural", "success_core"], default="success_core")
+    p.add_argument("--aux-failure-ratio", type=float, default=0.25)
+    p.add_argument("--balance", choices=["natural", "episode", "action_balanced", "action_weighted"],
+                   default="natural")
+    p.add_argument("--episode-cap", type=int, default=40)
+    p.add_argument("--min-class-count", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_manifest)
 
     args = ap.parse_args()

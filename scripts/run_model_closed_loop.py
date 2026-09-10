@@ -91,7 +91,18 @@ def main() -> int:
     ap.add_argument("--houses", nargs="*", default=None)
     ap.add_argument("--catalog", default="outputs/embodied_bc/catalog.json")
     ap.add_argument("--adapter", default=None)
-    ap.add_argument("--model-path", default="/root/autodl-tmp/models/Qwen2.5-VL-3B-Instruct")
+    ap.add_argument("--model-path", default="/root/autodl-tmp/models/Qwen3-VL-8B-Instruct")
+    ap.add_argument("--attn", default="sdpa", choices=["sdpa", "flash_attention_2", "eager"])
+    ap.add_argument("--max-batch", type=int, default=8)
+    ap.add_argument("--batch-window-ms", type=float, default=8.0)
+    ap.add_argument("--godview-url", default=None,
+                    help="optional Embodied Inspector URL to push display-only telemetry")
+    ap.add_argument("--model-tag", default=None,
+                    help="display label for the actor (e.g. qwen3-8b-weighted-bc)")
+    ap.add_argument("--training-profile", default=None,
+                    help="trainability profile label for the God View model card")
+    ap.add_argument("--visual-tokens", type=int, default=None,
+                    help="visual tokens per image (researcher metadata)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--episodes-per-house", type=int, default=3)
     ap.add_argument("--min-count", type=int, default=2)
@@ -135,11 +146,16 @@ def main() -> int:
             os.remove(f)
         except OSError:
             pass
+    info_file = os.path.join(args.out_root, "model_info.json")
     cmd = [
         args.torch_python, MODEL_SERVER,
         "--port", str(args.server_port),
         "--model-path", args.model_path,
         "--ready-file", ready,
+        "--info-file", info_file,
+        "--attn", args.attn,
+        "--max-batch", str(args.max_batch),
+        "--batch-window-ms", str(args.batch_window_ms),
     ]
     if args.adapter:
         cmd += ["--adapter", args.adapter]
@@ -171,6 +187,53 @@ def main() -> int:
               flush=True)
         with open(os.path.join(run_dir, "pool_result.json"), "w") as f:
             json.dump(res, f, indent=2, default=str)
+
+        agg = res.get("aggregate", {}) or {}
+        model_info = {}
+        try:
+            with open(info_file, "r", encoding="utf-8") as f:
+                model_info = json.load(f).get("model", {})
+        except Exception:
+            pass
+        model_info = dict(model_info)
+        if args.model_tag:
+            model_info["label"] = args.model_tag
+        if args.training_profile:
+            model_info["training_profile"] = args.training_profile
+        if args.visual_tokens:
+            model_info["visual_tokens"] = args.visual_tokens
+        model_info["visual_resolution"] = f"{args.width}x{args.width}"
+        telemetry = {
+            "ts": time.time(),
+            "model": model_info,
+            "runtime": {
+                "agents": args.workers,
+                "env_steps_per_sec": agg.get("aggregate_steps_per_sec"),
+                "episodes_per_hour": round(agg.get("episodes_per_min", 0.0) * 60.0, 2),
+                "successful_episodes_per_hour": round(
+                    agg.get("successful_episodes_per_min", 0.0) * 60.0, 2),
+                "episodes": agg.get("episodes"),
+                "successful_episodes": agg.get("successful_episodes"),
+                "total_env_steps": agg.get("total_env_steps"),
+                "model_batch": args.max_batch,
+                "decision_p50_ms": (agg.get("env_step_latency_ms") or {}).get("p50_ms"),
+                "outcome_codes": agg.get("outcome_codes"),
+            },
+        }
+        with open(os.path.join(args.out_root, "live_telemetry.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(telemetry, f, indent=2, default=str)
+        if args.godview_url:
+            try:
+                req = urllib.request.Request(
+                    args.godview_url.rstrip("/") + "/api/telemetry",
+                    data=json.dumps(telemetry).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                opener.open(req, timeout=5).read()
+            except Exception:
+                pass
         return 0
     finally:
         try:

@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DEFAULT_MODEL_PATH = "/root/autodl-tmp/models/Qwen2.5-VL-3B-Instruct"
+DEFAULT_MODEL_PATH = "/root/autodl-tmp/models/Qwen3-VL-8B-Instruct"
 
 
 def main() -> int:
@@ -37,6 +37,14 @@ def main() -> int:
     ap.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     ap.add_argument("--out", default="outputs/embodied_bc/train/run1")
     ap.add_argument("--profile", default="max_performance")
+    ap.add_argument("--attn", default="sdpa", choices=["sdpa", "flash_attention_2", "eager"])
+    ap.add_argument("--trainability", default="A", choices=["A", "B", "C"],
+                    help="A: LM LoRA (vision frozen); B: LM LoRA + projector/merger; "
+                         "C: broader multimodal LoRA")
+    ap.add_argument("--microbatch", type=int, default=None,
+                    help="override profile microbatch (grad accum auto-derived)")
+    ap.add_argument("--gradient-checkpointing", action="store_true",
+                    help="enable gradient checkpointing (required for 8B on 32GB)")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--seed", type=int, default=42)
@@ -47,14 +55,15 @@ def main() -> int:
 
     import torch
     from peft import get_peft_model
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
     from spatialforge.experiment.training import (
+        collect_trainability_targets,
         create_lora_config,
         get_execution_profile,
         load_training_records,
         run_formal_training_loop,
     )
+    from spatialforge.models.vl_adapter import load_model, load_processor, resolve_spec
 
     run_dir = Path(args.out)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -75,11 +84,13 @@ def main() -> int:
                 fo.write(fi.read())
 
     t0 = time.time()
-    processor = AutoProcessor.from_pretrained(str(args.model_path))
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        str(args.model_path), torch_dtype=torch.bfloat16, device_map="cuda"
-    )
-    lora_cfg = create_lora_config()
+    spec = resolve_spec(str(args.model_path), attn_implementation=args.attn)
+    processor = load_processor(str(args.model_path))
+    model = load_model(spec)
+    targets = collect_trainability_targets(model, args.trainability)
+    print(f"[train] family={spec.family} trainability={args.trainability} "
+          f"lora_targets={len(targets)}", flush=True)
+    lora_cfg = create_lora_config(target_modules=targets)
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
@@ -88,8 +99,15 @@ def main() -> int:
         config,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
-        gradient_checkpointing=False,
+        gradient_checkpointing=bool(args.gradient_checkpointing or config.gradient_checkpointing),
     )
+    if args.microbatch:
+        mb = int(args.microbatch)
+        config = replace(
+            config,
+            per_device_train_batch_size=mb,
+            gradient_accumulation_steps=max(1, config.effective_batch_size // mb),
+        )
     summary = run_formal_training_loop(
         model,
         processor,
@@ -107,6 +125,9 @@ def main() -> int:
     )
     summary["wall_time_sec"] = round(time.time() - t0, 2)
     summary["model"] = str(args.model_path)
+    summary["model_spec"] = spec.to_dict()
+    summary["trainability_profile"] = args.trainability
+    summary["lora_target_count"] = len(targets)
     summary["train_samples"] = len(records)
     summary["val_samples"] = len(val_records)
     with open(run_dir / "training_summary.json", "w") as f:

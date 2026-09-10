@@ -37,16 +37,12 @@ def main() -> int:
     ap.add_argument("--tag", default="bc-vs-base")
     args = ap.parse_args()
 
-    import torch
-    from peft import PeftModel
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-
     from spatialforge.experiment.training import (
-        format_chat_prompt,
         load_and_preprocess_image,
         load_training_records,
         run_inference_greedy,
     )
+    from spatialforge.models.vl_adapter import load_model, load_processor, resolve_spec
 
     base_dir = Path(args.val_manifest).parent
     records = load_training_records(args.val_manifest, base_dir=base_dir)
@@ -65,13 +61,10 @@ def main() -> int:
         records = chosen[: args.limit]
     print(f"[eval] {len(records)} val records", flush=True)
 
-    processor = AutoProcessor.from_pretrained(str(args.model_path))
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        str(args.model_path), torch_dtype=torch.bfloat16, device_map="cuda"
-    )
-    if args.adapter:
-        model = PeftModel.from_pretrained(model, str(args.adapter))
-        model.eval()
+    spec = resolve_spec(str(args.model_path), adapter=args.adapter)
+    processor = load_processor(str(args.model_path))
+    model = load_model(spec)
+    model.eval()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -115,15 +108,25 @@ def main() -> int:
     n = len(rows)
     correct = sum(1 for r in rows if r["correct"])
     per_action_stats = {}
+    f1_values = []
     for a in BC_ACTION_VOCAB:
         info = per_action[a]
+        recall = info["tp"] / info["n"] if info["n"] else None
+        precision = info["tp"] / info["pred"] if info["pred"] else None
+        f1 = None
+        if precision is not None and recall is not None and (precision + recall) > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+        if info["n"] > 0:
+            f1_values.append(f1 if f1 is not None else 0.0)
         per_action_stats[a] = {
             "gold_count": info["n"],
             "gold_pct": round(info["n"] * 100.0 / max(n, 1), 2),
-            "accuracy": round(info["tp"] * 100.0 / max(info["n"], 1), 2) if info["n"] else None,
+            "recall": round(recall * 100.0, 2) if recall is not None else None,
             "pred_count": info["pred"],
-            "precision": round(info["tp"] * 100.0 / max(info["pred"], 1), 2) if info["pred"] else None,
+            "precision": round(precision * 100.0, 2) if precision is not None else None,
+            "f1": round(f1 * 100.0, 2) if f1 is not None else None,
         }
+    macro_f1 = sum(f1_values) / max(len(f1_values), 1) if f1_values else 0.0
     report = {
         "tag": args.tag,
         "model_path": str(args.model_path),
@@ -132,8 +135,13 @@ def main() -> int:
         "wall_sec": round(wall, 1),
         "samples_per_sec": round(n / max(wall, 0.001), 2),
         "overall_action_accuracy": round(correct * 100.0 / max(n, 1), 2),
+        "macro_f1": round(macro_f1 * 100.0, 2),
         "invalid_output_rate": round(conf["invalid"] * 100.0 / max(n, 1), 2),
         "per_action": per_action_stats,
+        "rotate_recall": {
+            "RotateLeft": per_action_stats["RotateLeft"]["recall"],
+            "RotateRight": per_action_stats["RotateRight"]["recall"],
+        },
         "done": {
             "gold_done": done_true,
             "pred_done": done_pred,

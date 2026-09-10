@@ -116,6 +116,9 @@ def build_privileged_research_record(
     teacher_plan: Optional[Dict[str, Any]] = None,
     spawn: Optional[Dict[str, Any]] = None,
     frames: Optional[List[str]] = None,
+    setup: Optional[Dict[str, Any]] = None,
+    render_quality: Optional[str] = None,
+    house_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the researcher-only record with full privileged truth."""
     steps: List[Dict[str, Any]] = []
@@ -127,6 +130,7 @@ def build_privileged_research_record(
             {
                 "step": trans.step,
                 "action_type": action.action_type.value if action else None,
+                "action_origin": getattr(action, "origin", None) if action else None,
                 "action_success": action.success if action else None,
                 "agent": _pose_to_dict(trans.agent_state),
                 "authoritative_target_visible": trans.observation.target_visible,
@@ -142,6 +146,9 @@ def build_privileged_research_record(
         "task": copy.deepcopy(task_privileged_view),
         "episode": episode_state.to_dict() if hasattr(episode_state, "to_dict") else episode_state,
         "spawn": copy.deepcopy(spawn) or {},
+        "setup": copy.deepcopy(setup) or {},
+        "render_quality": render_quality,
+        "house_path": house_path,
         "teacher_plan": copy.deepcopy(teacher_plan) or {},
         "steps": steps,
         "frames": list(frames or []),

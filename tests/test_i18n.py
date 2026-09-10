@@ -55,6 +55,17 @@ class I18nTests(unittest.TestCase):
             self.assertNotIn("[", t(key, "zh-CN"))
             self.assertNotIn("[", t(key, "en"))
 
+    def test_workbench_keys_present(self):
+        for key in ("mode.live", "mode.replay", "wb.godview", "wb.timeline",
+                    "wb.decision", "wb.privileged", "dec.raw", "dec.parsed",
+                    "dec.executed", "dec.teacher", "dec.visible", "dec.verifier",
+                    "dec.terminal", "metrics.actions", "live.poll", "overlay.target",
+                    "player.play", "player.pause", "player.prev", "player.next",
+                    "player.speed"):
+            self.assertNotIn("[", t(key, "zh-CN"))
+            self.assertNotIn("[", t(key, "en"))
+            self.assertNotIn("[", ls(key, "bilingual"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,6 +143,10 @@ def build_agent_model_input(
     if history is not None:
         for action in history.actions:
             d = action.to_dict()
+            # environment setup / teleport bookkeeping is not agent behavior and
+            # must never appear in the model's permitted action history.
+            if d.get("origin") in ("setup", "spawn", "reset"):
+                continue
             # keep only step + outcome semantics; drop nothing privileged anyway
             permitted_action_history.append(
                 {

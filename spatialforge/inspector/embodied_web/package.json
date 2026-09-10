@@ -1,0 +1,6 @@
+{
+  "name": "spatialforge-embodied-web",
+  "private": true,
+  "type": "module",
+  "description": "Browser assets for the SpatialForge embodied Inspector. The package.json only declares ESM so the pure scene2d.js module can be executed by the cross-language consistency tests under node."
+}
